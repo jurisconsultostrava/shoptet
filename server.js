@@ -250,7 +250,14 @@ function categoriesXml(cat) { return cat ? `<CATEGORIES><CATEGORY id="${cat.id}"
 function replaceCategories(block, cat) {
   if (!cat) return block;
   const xml = categoriesXml(cat);
-  if (/<CATEGORIES>[\s\S]*?<\/CATEGORIES>/i.test(block)) return block.replace(/<CATEGORIES>[\s\S]*?<\/CATEGORIES>/i, xml);
+  // Kategorii doplníme JEN novému produktu (žádnou nemá). Existující zařazení nepřepisujeme.
+  const m = block.match(/<CATEGORIES>([\s\S]*?)<\/CATEGORIES>/i);
+  if (m) {
+    const hasCategory = /<CATEGORY[\s>]/i.test(m[1]);  // obsahuje aspoň jednu kategorii?
+    if (hasCategory) return block;                      // už zařazeno → nech být
+    return block.replace(/<CATEGORIES>[\s\S]*?<\/CATEGORIES>/i, xml);  // prázdné → doplň
+  }
+  // CATEGORIES blok chybí → doplň
   if (/<ITEM_TYPE>[\s\S]*?<\/ITEM_TYPE>/i.test(block)) return block.replace(/(<ITEM_TYPE>[\s\S]*?<\/ITEM_TYPE>)/i, `$1${xml}`);
   return block.replace(/<\/SHOPITEM>/i, `\n${xml}\n</SHOPITEM>`);
 }
@@ -270,8 +277,9 @@ function updateXmlByCode(originalXml, updates) {
     const u = byCode.get(String(productCode(block)));
     if (!u || !u.apply) return block;
     let out = block;
-    if (u.newName) out = replaceTag(out, 'NAME', u.newName, true);
-    if (u.newManufacturer) out = replaceTag(out, 'MANUFACTURER', u.newManufacturer, true);
+    // Název přepíšeme JEN tvým českým (ze supplier XML). Anglické StoneX názvy ani
+    // generované překlady do feedu nepouštíme — necháme název, co je v Shoptetu.
+    if (u.newName && u.newNameIsCzech) out = replaceTag(out, 'NAME', u.newName, true);
     if (u.updatePurchasePrice && u.newPurchasePrice !== null && u.newPurchasePrice !== undefined) out = replaceTag(out, 'PURCHASE_PRICE', String(u.newPurchasePrice), true);
     if (u.updatePrice && u.newPrice !== null && u.newPrice !== undefined) out = replaceTag(out, 'PRICE', String(u.newPrice), true);
     if (u.newAvailabilityIn) out = replaceTag(out, 'AVAILABILITY_IN_STOCK', u.newAvailabilityIn, true);
@@ -303,6 +311,38 @@ async function fetchStoneXPdfRows(inputUrl) {
   const rows = parseStoneXPdfText(parsed.text || '', pdfUrl);
   if (!rows.length) throw new Error('StoneX PDF loaded, but no product rows were parsed.');
   return rows;
+}
+
+// Z PDF katalogu (catalog-search) vytáhne premium % pro každý produkt podle hmotnosti.
+// Řádek PDF: "<název> ... <WE SELL Kč> <premium%> <váha>g". Vrací pole {name, weight, premiumPct}.
+async function fetchStoneXPremiumRows() {
+  // Stáhne PDF přes přihlášenou session (catalog-search PDF endpoint).
+  const cookies = (process.env.STONEX_USER && process.env.STONEX_PASS) ? await ensureSession() : null;
+  const url = 'https://stonexbullion.com/api/client/catalog/pdf/?t=' + Date.now() + '&url=%2Fen%2Fgold%2F&update_filters=true&metal_ids%5B%5D=1&term=&page=1';
+  const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000, validateStatus: () => true,
+    headers: { 'User-Agent': BROWSER_UA, 'Accept': 'application/pdf,*/*', ...(cookies ? { Cookie: cookieHeader(cookies) } : {}) } });
+  if (r.status >= 400) throw new Error(`StoneX premium PDF HTTP ${r.status}`);
+  const parsed = await pdfParse(Buffer.from(r.data));
+  const text = parsed.text || '';
+  const out = [];
+  // Hledá: ... <číslo s mezerami>,<dd> Kč <premium>% <váha>g  (poslední premium% před váhou = WE SELL premium)
+  const lineRe = /([0-9][0-9 ]*[.,][0-9]{2})\s*Kč\s+(-?\d+[.,]\d+)%\s+([\d.,]+)\s*g/g;
+  // Projdeme po řádcích, vezmeme název = text před první "Kč" částkou
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    // poslední výskyt "premium% váhag" na řádku = WE SELL
+    let m, last = null;
+    const re = /(-?\d+[.,]\d+)%\s+([\d.,]+)\s*g\b/g;
+    while ((m = re.exec(line)) !== null) last = m;
+    if (!last) continue;
+    const premiumPct = parseFloat(last[1].replace(',', '.'));
+    const weight = parseFloat(last[2].replace(',', '.'));
+    // název = část řádku před první číslicí ceny/percenta
+    const name = line.replace(/\s*-?[\d  ][\d  .,]*\s*Kč.*$/, '').replace(/\s+\d.*$/, '').trim() || line.slice(0, 40);
+    if (weight > 0 && !isNaN(premiumPct)) out.push({ name, weight, premiumPct });
+  }
+  return out;
 }
 
 // --- JSON katalog endpoint (part_number + gross_price) ---
@@ -497,20 +537,46 @@ function parseStoneXPdfText(text, sourceUrl) {
   const seen = new Set();
   return rows.filter(r => { const key = r.normalizedName; if (seen.has(key)) return false; seen.add(key); return true; });
 }
-function normalizeStoneXToCzName(p) { const name = `${p.stonexName || p.name || ''} ${p.mint || ''}`; const lower = name.toLowerCase(); const manufacturer = p.mint || inferManufacturer(name); const type = /coin|krugerrand|britannia|kangaroo|maple|philharmoniker|eagle|buffalo|lunar/i.test(name) ? 'mince' : 'slitek'; let metal = type === 'mince' ? 'zlatá' : 'zlatý'; if (/silver/.test(lower)) metal = type === 'mince' ? 'stříbrná' : 'stříbrný'; if (/platinum/.test(lower)) metal = type === 'mince' ? 'platinová' : 'platinový'; const series = detectSeries(name); const weight = normalizeWeight(p.weight || name); return clean([manufacturer, series, metal, type, weight].filter(Boolean).join(' ')); }
+function normalizeStoneXToCzName(p) {
+  const name = `${p.stonexName || p.name || ''} ${p.mint || ''}`;
+  const lower = name.toLowerCase();
+  const manufacturer = p.mint || inferManufacturer(name);
+  const isCoinType = /coin|krugerrand|britannia|kangaroo|maple|philharmoniker|eagle|buffalo|lunar|koala|panda|sovereign|ducat|dukát|libertad|corona|franc|peso/i.test(name);
+  const type = isCoinType ? 'mince' : 'slitek';
+  let metal = type === 'mince' ? 'zlatá' : 'zlatý';
+  if (/silver/.test(lower)) metal = type === 'mince' ? 'stříbrná' : 'stříbrný';
+  if (/platinum/.test(lower)) metal = type === 'mince' ? 'platinová' : 'platinový';
+  if (/palladium/.test(lower)) metal = type === 'mince' ? 'palladiová' : 'palladiový';
+  // způsob ražby: Minted → ražený, Casted → litý (jen u slitků)
+  let method = '';
+  if (type === 'slitek') {
+    if (/minted/i.test(name)) method = metal.endsWith('ý') ? 'ražený' : 'ražená';
+    else if (/casted|cast\b/i.test(name)) method = metal.endsWith('ý') ? 'litý' : 'litá';
+  }
+  // série (Fortuna, Buffalo, Britannia, Kinebar...) a u mincí rok ražby
+  const series = detectSeries(name);
+  let year = '';
+  if (type === 'mince') { const ym = name.match(/\b(19|20)\d{2}\b/); if (ym) year = ym[0]; }
+  const weight = normalizeWeight(p.weight || name);
+  // Slitek: [výrobce] [série] [kov] [typ] [ražený/litý] [hmotnost]
+  // Mince:  [výrobce] [série] [kov] [typ] [hmotnost] [rok]
+  const parts = (type === 'mince')
+    ? [manufacturer, series, metal, type, weight, year]
+    : [manufacturer, series, metal, type, method, weight];
+  return clean(parts.filter(Boolean).join(' '));
+}
 function compare(stonexRows, supplierRows, opts = {}) {
   const eurCzk = Number(opts.eurCzk || DEFAULT_EUR_CZK);
   const marginCzk = Number(opts.marginCzk ?? DEFAULT_MARGIN_CZK);
   const marginPercent = Number(opts.marginPercent ?? DEFAULT_MARGIN_PERCENT);
   const supplierByCode = new Map(supplierRows.map(r => [String(r.code), r]));
-  const supplierByName = new Map(supplierRows.map(r => [r.normalizedName, r]).filter(([k]) => k));
-  const supplierByProductKey = new Map(supplierRows.map(r => [r.productKey, r]).filter(([k]) => k));
   return stonexRows.map(s => {
     let code = String(s.productNumber || s.code || '');
     let supplier = code ? supplierByCode.get(code) : null;
     let matchMethod = supplier ? 'code' : '';
-    if (!supplier && s.normalizedName) { supplier = supplierByName.get(s.normalizedName); matchMethod = supplier ? 'name' : ''; }
-    if (!supplier && s.productKey) { supplier = supplierByProductKey.get(s.productKey); matchMethod = supplier ? 'productKey' : ''; }
+    // Párujeme POUZE přes kód (part_number = CODE). Název/productKey fallbacky byly
+    // zdrojem špatných párů (Noemova archa ↔ 4 různé StoneX, China Panda ↔ Tudor Beasts),
+    // protože různé produkty stejné hmotnosti mají podobný název. Kód je unikátní.
     if (supplier && !code) code = supplier.code;
     const stonexCzk = (s.grossPrice != null) ? round(s.grossPrice, 2)
                       : (s.priceEur ? round(s.priceEur * eurCzk, 2) : null);
@@ -532,8 +598,12 @@ function compare(stonexRows, supplierRows, opts = {}) {
     if (proposedPrice != null && stonexCzk != null && proposedPrice <= stonexCzk) {
       proposedPrice = round(stonexCzk * 1.005, 0);
     }
-    const base = { code, newName: supplier?.name || normalizeStoneXToCzName(s), supplierName: supplier?.name || '', stonexName: s.stonexName || s.name, mint: s.mint, weight: s.weight };
-    return { apply: Boolean(supplier && stonexCzk), code, matched: Boolean(supplier), matchMethod, stonexName: s.stonexName || s.name, suggestedName: normalizeStoneXToCzName(s), stonexUrl: s.url, productNumber: code, mint: s.mint, weight: s.weight, purity: s.purity, country: s.country, availability: s.availability, priceEur: s.priceEur, premiumEur: s.premiumEur, premiumPct: s.premiumPct, stonexCzk, supplierName: supplier?.name || '', supplierPrice: supplier?.price ?? null, supplierPurchasePrice: supplier?.purchasePrice ?? null, marginPct: effPct, diffPurchase: supplier && stonexCzk ? round((supplier.purchasePrice || 0) - stonexCzk, 2) : null, newPurchasePrice: stonexCzk || supplier?.purchasePrice || null, newPrice: proposedPrice || supplier?.price || null, newName: base.newName, newManufacturer: s.mint || inferManufacturer(s.stonexName || s.name), newAvailabilityIn: DEFAULT_IN_STOCK_TEXT, newAvailabilityOut: DEFAULT_OUT_OF_STOCK_TEXT, newWarehouseQty: s.availability && s.availability > 0 ? 1 : null, warehouseName: DEFAULT_WAREHOUSE, updatePurchasePrice: Boolean(stonexCzk), updatePrice: Boolean(stonexCzk && proposedPrice), updateCategory: true, category: inferCategory(base, '') };
+    // Název: když supplier (Shoptet) název CHYBÍ, vygeneruj český z výrobce+typu+hmotnosti.
+    // Když supplier název je, NEPŘEPISUJEME (necháme tvůj v Shoptetu).
+    const hasSupplierName = Boolean(supplier?.name && supplier.name.trim());
+    const genName = normalizeStoneXToCzName(s);
+    const base = { code, newName: hasSupplierName ? null : genName, newNameIsCzech: !hasSupplierName && Boolean(genName), supplierName: supplier?.name || '', stonexName: s.stonexName || s.name, mint: s.mint, weight: s.weight };
+    return { apply: Boolean(supplier && stonexCzk), code, matched: Boolean(supplier), matchMethod, stonexName: s.stonexName || s.name, suggestedName: normalizeStoneXToCzName(s), stonexUrl: s.url, productNumber: code, mint: s.mint, weight: s.weight, purity: s.purity, country: s.country, availability: s.availability, priceEur: s.priceEur, premiumEur: s.premiumEur, premiumPct: s.premiumPct, stonexCzk, supplierName: supplier?.name || '', supplierPrice: supplier?.price ?? null, supplierPurchasePrice: supplier?.purchasePrice ?? null, marginPct: effPct, diffPurchase: supplier && stonexCzk ? round((supplier.purchasePrice || 0) - stonexCzk, 2) : null, newPurchasePrice: stonexCzk || supplier?.purchasePrice || null, newPrice: proposedPrice || supplier?.price || null, newName: base.newName, newNameIsCzech: base.newNameIsCzech, newManufacturer: s.mint || inferManufacturer(s.stonexName || s.name), newAvailabilityIn: DEFAULT_IN_STOCK_TEXT, newAvailabilityOut: DEFAULT_OUT_OF_STOCK_TEXT, newWarehouseQty: s.availability && s.availability > 0 ? 1 : null, warehouseName: DEFAULT_WAREHOUSE, updatePurchasePrice: Boolean(stonexCzk), updatePrice: Boolean(stonexCzk && proposedPrice), updateCategory: true, category: inferCategory(base, '') };
   });
 }
 
@@ -573,6 +643,27 @@ async function runFullCycle() {
   // 3b) Spot zlata + dopočet nespárovaných zlatých produktů.
   let spot = null;
   try { spot = await getGoldSpotCzkPerGram(); } catch (e) { console.warn('[SPOT]', e.message); }
+
+  // Premium z PDF katalogu (přesné premium % pro každý produkt) — pro neskladové.
+  let premiumRows = [];
+  try { premiumRows = await fetchStoneXPremiumRows(); } catch (e) { console.warn('[PREMIUM-PDF]', e.message); }
+
+  // Najde reálné premium % z PDF pro daný supplier název + hmotnost.
+  function premiumPctFromPdf(supName, fw) {
+    if (!premiumRows.length || !fw) return null;
+    const low = (supName || '').toLowerCase();
+    // klíčová slova výrobce/série z názvu pro spárování s PDF řádkem
+    const kw = ['pamp','argor','valcambi','heraeus','perth','britannia','maple','philharmon','krugerrand','buffalo','eagle','kangaroo','umicore','c.hafner','hafner','noah','tudor','queen','panda','lunar','sovereign','vreneli','corona','ducat','dukát'];
+    const supKw = kw.filter(k => low.includes(k));
+    let best = null;
+    for (const p of premiumRows) {
+      if (Math.abs(p.weight - fw) / fw > 0.02) continue;  // hmotnost musí sedět (±2 %)
+      const pl = p.name.toLowerCase();
+      const score = supKw.filter(k => pl.includes(k)).length;
+      if (score > 0 && (!best || score > best.score)) best = { ...p, score };
+    }
+    return best ? best.premiumPct : null;
+  }
 
   const opts = marginOptionsFromEnv();
   function marginForWeight(fw, isCoin) {
@@ -615,8 +706,16 @@ async function runFullCycle() {
       const isGold = /zlat|gold/.test(name) && !/st[rř][ií]b|silver|platin|pallad/.test(name);
       const fw = weightGrams(sup.name || '');
       if (!isGold || !fw) continue;
-      const premPerG = premiumPerGramBand(fw) || 0;
-      const nakup = spot * fw * 0.9999 + premPerG * fw;
+      // Přesné premium z PDF (pokud najdeme), jinak odhad průměrem z pásma.
+      const pctFromPdf = premiumPctFromPdf(sup.name, fw);
+      let nakup;
+      if (pctFromPdf != null) {
+        // cena = (spot×váha×ryzost) × (1 + premium%/100)
+        nakup = spot * fw * 0.9999 * (1 + pctFromPdf / 100);
+      } else {
+        const premPerG = premiumPerGramBand(fw) || 0;
+        nakup = spot * fw * 0.9999 + premPerG * fw;
+      }
       const m = marginForWeight(fw, /coin|mince/.test(name));
       let price = Math.round(nakup * (1 + m / 100));
       if (sup.purchasePrice && price < sup.purchasePrice) {
@@ -626,7 +725,8 @@ async function runFullCycle() {
         code: sup.code, apply: true, updatePrice: true, updatePurchasePrice: true,
         matched: false, matchMethod: 'spot',
         newPrice: price, newPurchasePrice: Math.round(nakup),
-        newName: sup.name, updateCategory: false,
+        newName: (sup.name && sup.name.trim()) ? null : normalizeStoneXToCzName({ stonexName: sup.name, name: sup.name, mint: '' }),
+        newNameIsCzech: !(sup.name && sup.name.trim()), updateCategory: false,
         newAvailabilityOut: DEFAULT_OUT_OF_STOCK_TEXT,   // dopočtené = StoneX nemá skladem → předobjednávka
         newWarehouseQty: 0, warehouseName: DEFAULT_WAREHOUSE,
       });
@@ -744,4 +844,6 @@ app.listen(PORT, () => {
     console.log('[CRON] Vypnuto (ENABLE_CRON=false nebo neplatný CRON_SCHEDULE).');
   }
 });
+
+
 
