@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StoneX → Shoptet Feed Tool</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>StoneX → Shoptet Feed Tool</h1>
+      <p>Interní nástroj pro stažení StoneX katalogu (JSON), spárování přes Product number = CODE, kontrolu cen a generování Shoptet supplier XML.</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="card grid two">
+      <div>
+        <h2>1. Přístup</h2>
+        <label>APP_PASSWORD</label>
+        <input id="password" type="password" placeholder="Heslo z Railway Variables" />
+        <p class="hint">Pokud není APP_PASSWORD na Railway nastaveno, pole může zůstat prázdné.</p>
+      </div>
+      <div>
+        <h2>2. Supplier XML</h2>
+        <label>Nahrát productsSupplier.xml</label>
+        <input id="supplierFile" type="file" accept=".xml,text/xml,application/xml" />
+        <button id="parseSupplier">Načíst supplier XML</button>
+        <p class="hint">Alternativně backend použije SHOPTET_SUPPLIER_FEED_URL z Railway Variables.</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>3. StoneX katalog (JSON)</h2>
+      <div class="grid three">
+        <div>
+          <label>StoneX katalogová URL (JSON endpoint, volitelné)</label>
+          <input id="stonexUrl" type="text" value="https://stonexbullion.com/api/client/catalog/pdf/?t=1779060115801&url=%2Fen%2Fgold%2F&update_filters=true&metal_ids%5B%5D=1&term=&page=1" />
+        </div>
+        <div>
+          <label>Max. detailů / položek</label>
+          <input id="maxDetails" type="number" value="30" min="1" max="200" />
+          <label class="checkline"><input id="allowFallback" type="checkbox" /> Povolit testovací fallback</label>
+        </div>
+        <div class="buttonCol">
+          <button id="fetchStoneX">Stáhnout StoneX data</button>
+        </div>
+      </div>
+      <p class="hint">Data se stahují z StoneX JSON katalogu přes přihlášení (STONEX_USER/PASS). URL je jen volitelný doplněk.</p>
+    </section>
+
+    <section class="card">
+      <h2>4. Cenový model</h2>
+      <p class="hint">Prodejní cena = StoneX cena × (1 + marže dle kategorie). Nákupní cena = StoneX cena. Pokud StoneX vrátí cenu v EUR, přepočítá se kurzem níže.</p>
+      <div class="grid four">
+        <div>
+          <label>EUR/CZK (pro přepočet, když je cena v EUR)</label>
+          <input id="eurCzk" type="number" value="24.335" step="0.001" />
+        </div>
+        <div>
+          <label>Marže mince %</label>
+          <input id="marginCoin" type="number" value="1.5" step="0.1" />
+        </div>
+        <div>
+          <label>Marže slitek do 1 oz %</label>
+          <input id="marginBarSmall" type="number" value="2" step="0.1" />
+        </div>
+        <div>
+          <label>Marže slitek 1 oz–100 g %</label>
+          <input id="marginBarMid" type="number" value="1" step="0.1" />
+        </div>
+        <div>
+          <label>Marže slitek nad 100 g %</label>
+          <input id="marginBarLarge" type="number" value="0.5" step="0.1" />
+        </div>
+        <div class="buttonCol">
+          <button id="compareBtn">Porovnat</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="stats">
+      <div><strong id="supplierCount">0</strong><span>Supplier produktů</span></div>
+      <div><strong id="stonexCount">0</strong><span id="stonexCountLabel">StoneX produktů</span></div>
+      <div><strong id="matchedCount">0</strong><span>Spárováno</span></div>
+      <div><strong id="appliedCount">0</strong><span>Vybráno k exportu</span></div>
+    </section>
+
+    <section class="card">
+      <div class="toolbar">
+        <h2>5. Kontrola a ruční úpravy</h2>
+        <div>
+          <button id="selectAll" class="secondary">Označit vše spárované</button>
+          <button id="selectNone" class="secondary">Odznačit vše</button>
+          <button id="downloadXml">Vygenerovat XML</button>
+        </div>
+      </div>
+      <div class="tableWrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Export</th>
+              <th>CODE</th>
+              <th>StoneX název</th>
+              <th>Shoptet název</th>
+              <th>StoneX EUR</th>
+              <th>StoneX CZK</th>
+              <th>PURCHASE_PRICE</th>
+              <th>Nový PURCHASE</th>
+              <th>PRICE</th>
+              <th>Nový PRICE</th>
+              <th>Dostupnost</th>
+              <th>Výrobce</th>
+              <th>Nový název</th>
+            </tr>
+          </thead>
+          <tbody id="rows"><tr><td colspan="13" class="empty">Načti supplier XML a StoneX data.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="log card">
+      <h2>Log</h2>
+      <pre id="log"></pre>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
