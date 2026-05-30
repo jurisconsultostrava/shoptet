@@ -744,3 +744,4 @@ app.listen(PORT, () => {
     console.log('[CRON] Vypnuto (ENABLE_CRON=false nebo neplatný CRON_SCHEDULE).');
   }
 });
+
