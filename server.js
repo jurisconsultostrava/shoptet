@@ -271,11 +271,13 @@ function inferCategory(update, block = '') {
   if (/gold|zlat/.test(text)) return isCoin ? (SHOP_CATEGORIES.GOLD_COINS[weight] || SHOP_CATEGORIES.GOLD_COINS.root) : (SHOP_CATEGORIES.GOLD_BARS[weight] || SHOP_CATEGORIES.GOLD);
   return null;
 }
-function updateXmlByCode(originalXml, updates) {
+function updateXmlByCode(originalXml, updates, dropUnmatched = true) {
   const byCode = new Map(updates.map(u => [String(u.code), u]));
   return originalXml.replace(/<SHOPITEM\b[\s\S]*?<\/SHOPITEM>/gi, block => {
     const u = byCode.get(String(productCode(block)));
-    if (!u || !u.apply) return block;
+    // Nespárovaný produkt (StoneX nemá skladem): vyhodit z feedu úplně.
+    // Shoptet ho pak vyhodnotí jako "chybějící ve feedu" → skrýt produkt.
+    if (!u || !u.apply) return dropUnmatched ? '' : block;
     let out = block;
     // Název přepíšeme JEN tvým českým (ze supplier XML). Anglické StoneX názvy ani
     // generované překlady do feedu nepouštíme — necháme název, co je v Shoptetu.
@@ -637,117 +639,22 @@ async function runFullCycle() {
   // 2) StoneX katalog (JSON, auto-login)
   const stonexRows = await fetchStoneXJsonRows();
 
-  // 3) párování + ceny
+  // 3) párování + ceny — POUZE produkty, které StoneX má skladem (spárované přes kód).
   const rows = compare(stonexRows, supplierRows, marginOptionsFromEnv());
 
-  // 3b) Spot zlata + dopočet nespárovaných zlatých produktů.
-  let spot = null;
-  try { spot = await getGoldSpotCzkPerGram(); } catch (e) { console.warn('[SPOT]', e.message); }
-
-  // Premium z PDF katalogu (přesné premium % pro každý produkt) — pro neskladové.
-  let premiumRows = [];
-  try { premiumRows = await fetchStoneXPremiumRows(); } catch (e) { console.warn('[PREMIUM-PDF]', e.message); }
-
-  // Najde reálné premium % z PDF pro daný supplier název + hmotnost.
-  function premiumPctFromPdf(supName, fw) {
-    if (!premiumRows.length || !fw) return null;
-    const low = (supName || '').toLowerCase();
-    // klíčová slova výrobce/série z názvu pro spárování s PDF řádkem
-    const kw = ['pamp','argor','valcambi','heraeus','perth','britannia','maple','philharmon','krugerrand','buffalo','eagle','kangaroo','umicore','c.hafner','hafner','noah','tudor','queen','panda','lunar','sovereign','vreneli','corona','ducat','dukát'];
-    const supKw = kw.filter(k => low.includes(k));
-    let best = null;
-    for (const p of premiumRows) {
-      if (Math.abs(p.weight - fw) / fw > 0.02) continue;  // hmotnost musí sedět (±2 %)
-      const pl = p.name.toLowerCase();
-      const score = supKw.filter(k => pl.includes(k)).length;
-      if (score > 0 && (!best || score > best.score)) best = { ...p, score };
-    }
-    return best ? best.premiumPct : null;
-  }
-
-  const opts = marginOptionsFromEnv();
-  function marginForWeight(fw, isCoin) {
-    if (isCoin) return opts.marginCoin;
-    if (fw == null) return opts.marginBarMid;
-    if (fw < 31.1035) return opts.marginBarSmall;
-    if (fw <= 100) return opts.marginBarMid;
-    return opts.marginBarLarge;
-  }
-  // Premium na gram odvozený z reálných StoneX cen (gross_price) produktů STEJNÉ hmotnosti.
-  // Ne přes premiumValue (nespolehlivé) a ne mícháním hmotností (1oz≠100g premium/g).
-  function premiumPerGramSameWeight(fw) {
-    if (!spot) return null;
-    // produkty se stejnou hmotností (±2 %) ze StoneX JSON, co mají cenu
-    const same = stonexRows.filter(s => {
-      if (s.metalId !== 1 || !s.fineWeight || s.grossPrice == null) return false;
-      return Math.abs(s.fineWeight - fw) / fw <= 0.02;
-    });
-    if (same.length) {
-      // premium/g = (gross - spot×váha×ryzost) / váha, průměr přes stejně velké
-      const avg = same.reduce((a, s) => a + ((s.grossPrice - spot * s.fineWeight * 0.9999) / s.fineWeight), 0) / same.length;
-      return avg > 0 ? avg : 0;
-    }
-    return null;  // žádný stejně velký → necháme na fallbacku
-  }
-
+  // Co StoneX nemá skladem (nespárované) = NENÍ ve feedu. Žádný dopočet ze spotu.
   let spotPriced = 0, belowCostFixed = 0;
-  if (spot) {
-    // Pojistka u spárovaných (rows = StoneX produkty se supplier protějškem)
-    for (const r of rows) {
-      if (r.matched && r.newPrice != null && r.stonexCzk != null && r.newPrice < r.stonexCzk) {
-        r.newPrice = Math.round(r.stonexCzk * 1.005);
-        r.updatePrice = true; belowCostFixed++;
-      }
-    }
-    // Které supplier kódy už pokrývá StoneX (jsou v rows jako matched)?
-    const coveredCodes = new Set(rows.filter(r => r.matched && r.code).map(r => String(r.code)));
-    // Dopočet ze spotu pro supplier produkty, které StoneX NEMÁ (nejsou v rows)
-    const spotUpdates = [];
-    for (const sup of supplierRows) {
-      if (!sup.code || coveredCodes.has(String(sup.code))) continue;
-      const name = (sup.name || '').toLowerCase();
-      const isGold = /zlat|gold/.test(name) && !/st[rř][ií]b|silver|platin|pallad/.test(name);
-      const fw = weightGrams(sup.name || '');
-      if (!isGold || !fw) continue;
-      // Premium odvozené z reálných StoneX cen STEJNĚ velkých 100g produktů (ne míchání 1oz/100g).
-      const premPerG = premiumPerGramSameWeight(fw);
-      let nakup;
-      if (premPerG != null) {
-        nakup = spot * fw * 0.9999 + premPerG * fw;
-      } else {
-        // žádný stejně velký StoneX produkt → konzervativní odhad: spot + 1,5 % premium
-        nakup = spot * fw * 0.9999 * 1.015;
-      }
-      const m = marginForWeight(fw, /coin|mince/.test(name));
-      let price = Math.round(nakup * (1 + m / 100));
-      if (sup.purchasePrice && price < sup.purchasePrice) {
-        price = Math.round(sup.purchasePrice * 1.005); belowCostFixed++;
-      }
-      spotUpdates.push({
-        code: sup.code, apply: true, updatePrice: true, updatePurchasePrice: true,
-        matched: false, matchMethod: 'spot',
-        newPrice: price, newPurchasePrice: Math.round(nakup),
-        newName: (sup.name && sup.name.trim()) ? null : normalizeStoneXToCzName({ stonexName: sup.name, name: sup.name, mint: '' }),
-        newNameIsCzech: !(sup.name && sup.name.trim()), updateCategory: false,
-        newAvailabilityOut: DEFAULT_OUT_OF_STOCK_TEXT,   // dopočtené = StoneX nemá skladem → předobjednávka
-        newWarehouseQty: 0, warehouseName: DEFAULT_WAREHOUSE,
-      });
-      spotPriced++;
-    }
-    // přidej dopočtené do rows, ať jdou do feedu
-    rows.push(...spotUpdates);
-  }
 
-  // 4) generování feedu (spárované + dopočtené ze spotu)
+  // 4) generování feedu (jen spárované)
   const updates = rows.filter(r => r.apply && r.updatePrice && r.code);
   const xml = updateXmlByCode(supplierXml, updates);
 
-  GENERATED_FEED = xml;
+  GENERATED_FEED = xml.replace(/\n\s*\n+/g, '\n');
   LAST_RUN = {
-    at: startedAt, finishedAt: new Date().toISOString(),
+    at: startedAt, finishedAt: new Date().toISOString(), codeVersion: 'drop-unmatched-2026-05-31',
     supplier: supplierRows.length, stonex: stonexRows.length,
     matched: rows.filter(r => r.matched).length, updated: updates.length,
-    spotPriced, belowCostFixed, spot: spot ? Math.round(spot) : null,
+    spotPriced, belowCostFixed, spot: null,
   };
   console.log(`[CRON] ${LAST_RUN.finishedAt} supplier=${LAST_RUN.supplier} stonex=${LAST_RUN.stonex} matched=${LAST_RUN.matched} spotPriced=${spotPriced} belowCostFixed=${belowCostFixed} updated=${updates.length}`);
   return LAST_RUN;
