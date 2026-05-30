@@ -673,18 +673,21 @@ async function runFullCycle() {
     if (fw <= 100) return opts.marginBarMid;
     return opts.marginBarLarge;
   }
-  // Průměrná prémie na gram ze spárovaných StoneX (dle hmotnostního pásma) — pro odhad u nespárovaných.
-  function premiumPerGramBand(fw) {
-    const band = stonexRows.filter(s => {
-      if (s.metalId !== 1 || !s.fineWeight || s.premiumValue == null) return false;
-      const w = s.fineWeight;
-      if (fw < 31.1035) return w < 31.1035;
-      if (fw <= 100) return w >= 31.1035 && w <= 100;
-      return w > 100;
+  // Premium na gram odvozený z reálných StoneX cen (gross_price) produktů STEJNÉ hmotnosti.
+  // Ne přes premiumValue (nespolehlivé) a ne mícháním hmotností (1oz≠100g premium/g).
+  function premiumPerGramSameWeight(fw) {
+    if (!spot) return null;
+    // produkty se stejnou hmotností (±2 %) ze StoneX JSON, co mají cenu
+    const same = stonexRows.filter(s => {
+      if (s.metalId !== 1 || !s.fineWeight || s.grossPrice == null) return false;
+      return Math.abs(s.fineWeight - fw) / fw <= 0.02;
     });
-    if (!band.length) return null;
-    const avg = band.reduce((a, s) => a + (s.premiumValue / s.fineWeight), 0) / band.length;
-    return avg;
+    if (same.length) {
+      // premium/g = (gross - spot×váha×ryzost) / váha, průměr přes stejně velké
+      const avg = same.reduce((a, s) => a + ((s.grossPrice - spot * s.fineWeight * 0.9999) / s.fineWeight), 0) / same.length;
+      return avg > 0 ? avg : 0;
+    }
+    return null;  // žádný stejně velký → necháme na fallbacku
   }
 
   let spotPriced = 0, belowCostFixed = 0;
@@ -706,15 +709,14 @@ async function runFullCycle() {
       const isGold = /zlat|gold/.test(name) && !/st[rř][ií]b|silver|platin|pallad/.test(name);
       const fw = weightGrams(sup.name || '');
       if (!isGold || !fw) continue;
-      // Přesné premium z PDF (pokud najdeme), jinak odhad průměrem z pásma.
-      const pctFromPdf = premiumPctFromPdf(sup.name, fw);
+      // Premium odvozené z reálných StoneX cen STEJNĚ velkých 100g produktů (ne míchání 1oz/100g).
+      const premPerG = premiumPerGramSameWeight(fw);
       let nakup;
-      if (pctFromPdf != null) {
-        // cena = (spot×váha×ryzost) × (1 + premium%/100)
-        nakup = spot * fw * 0.9999 * (1 + pctFromPdf / 100);
-      } else {
-        const premPerG = premiumPerGramBand(fw) || 0;
+      if (premPerG != null) {
         nakup = spot * fw * 0.9999 + premPerG * fw;
+      } else {
+        // žádný stejně velký StoneX produkt → konzervativní odhad: spot + 1,5 % premium
+        nakup = spot * fw * 0.9999 * 1.015;
       }
       const m = marginForWeight(fw, /coin|mince/.test(name));
       let price = Math.round(nakup * (1 + m / 100));
@@ -844,6 +846,3 @@ app.listen(PORT, () => {
     console.log('[CRON] Vypnuto (ENABLE_CRON=false nebo neplatný CRON_SCHEDULE).');
   }
 });
-
-
-
