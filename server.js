@@ -275,10 +275,18 @@ function updateXmlByCode(originalXml, updates, dropUnmatched = false) {
   const byCode = new Map(updates.map(u => [String(u.code), u]));
   return originalXml.replace(/<SHOPITEM\b[\s\S]*?<\/SHOPITEM>/gi, block => {
     const u = byCode.get(String(productCode(block)));
-    // Nespárovaný produkt (StoneX nemá teď skladem): nechat ve feedu BEZE ZMĚNY.
-    // Nemazat plošně — produkt může být dočasně vyprodaný a má zůstat jako předobjednávka.
-    // Staré duplicity se řeší ručně skrytím v Shoptetu, ne plošným dropem.
-    if (!u || !u.apply) return dropUnmatched ? '' : block;
+    // Nespárovaný produkt (StoneX nemá teď skladem): nechat ve feedu beze změny ceny,
+    // ALE pojistka — když je prodejní cena pod nákupní, zvednout ji nad nákup (+1 %),
+    // ať se nikdy neprodává se ztrátou (i u nespárovaných, co drží starou cenu).
+    if (!u || !u.apply) {
+      if (dropUnmatched) return '';
+      const curPrice = Number(textBetween(block, 'PRICE'));
+      const curPurchase = Number(textBetween(block, 'PURCHASE_PRICE'));
+      if (curPrice && curPurchase && curPrice < curPurchase) {
+        return replaceTag(block, 'PRICE', String(Math.round(curPurchase * 1.01)), true);
+      }
+      return block;
+    }
     let out = block;
     // Název přepíšeme JEN tvým českým (ze supplier XML). Anglické StoneX názvy ani
     // generované překlady do feedu nepouštíme — necháme název, co je v Shoptetu.
@@ -485,10 +493,10 @@ async function fetchCatalogJson(url) {
 async function fetchStoneXJsonRows() {
   const rows = [];
   for (const metal of STONEX_METALS) {
-    // Stáhneme CELÝ katalog (bez in_stock filtru) a dostupnost přečteme z reálných polí JSON.
+    // in_stock filtr → JEN skladové produkty. Quantity čteme z reálných polí pro počet kusů.
     let page = 1, last = 1;
     do {
-      const cat = await fetchCatalogJson(catalogUrl(metal.id, page, false));
+      const cat = await fetchCatalogJson(catalogUrl(metal.id, page, true));
       for (const p of cat.products || []) {
         const code = String(p.part_number || '').trim();
         if (!code) continue;
@@ -812,3 +820,4 @@ app.listen(PORT, () => {
     console.log('[CRON] Vypnuto (ENABLE_CRON=false nebo neplatný CRON_SCHEDULE).');
   }
 });
+
