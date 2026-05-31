@@ -271,17 +271,21 @@ function inferCategory(update, block = '') {
   if (/gold|zlat/.test(text)) return isCoin ? (SHOP_CATEGORIES.GOLD_COINS[weight] || SHOP_CATEGORIES.GOLD_COINS.root) : (SHOP_CATEGORIES.GOLD_BARS[weight] || SHOP_CATEGORIES.GOLD);
   return null;
 }
-function updateXmlByCode(originalXml, updates, dropUnmatched = true) {
+function updateXmlByCode(originalXml, updates, dropUnmatched = false) {
   const byCode = new Map(updates.map(u => [String(u.code), u]));
   return originalXml.replace(/<SHOPITEM\b[\s\S]*?<\/SHOPITEM>/gi, block => {
     const u = byCode.get(String(productCode(block)));
-    // Nespárovaný produkt (StoneX nemá skladem): vyhodit z feedu úplně.
-    // Shoptet ho pak vyhodnotí jako "chybějící ve feedu" → skrýt produkt.
+    // Nespárovaný produkt (StoneX nemá teď skladem): nechat ve feedu BEZE ZMĚNY.
+    // Nemazat plošně — produkt může být dočasně vyprodaný a má zůstat jako předobjednávka.
+    // Staré duplicity se řeší ručně skrytím v Shoptetu, ne plošným dropem.
     if (!u || !u.apply) return dropUnmatched ? '' : block;
     let out = block;
     // Název přepíšeme JEN tvým českým (ze supplier XML). Anglické StoneX názvy ani
     // generované překlady do feedu nepouštíme — necháme název, co je v Shoptetu.
     if (u.newName && u.newNameIsCzech) out = replaceTag(out, 'NAME', u.newName, true);
+    // PRODUCTNAME (Heureka) NEPŘEPISUJEME — přepis vytvářel unikátní názvy, na které
+    // Heureka zakládala nové karty (kde jsi sama) místo napárování na existující karty.
+    // Necháváme původní název ze Shoptetu, ať Heureka páruje normálně.
     if (u.updatePurchasePrice && u.newPurchasePrice !== null && u.newPurchasePrice !== undefined) out = replaceTag(out, 'PURCHASE_PRICE', String(u.newPurchasePrice), true);
     if (u.updatePrice && u.newPrice !== null && u.newPrice !== undefined) out = replaceTag(out, 'PRICE', String(u.newPrice), true);
     if (u.newAvailabilityIn) out = replaceTag(out, 'AVAILABILITY_IN_STOCK', u.newAvailabilityIn, true);
@@ -434,7 +438,9 @@ async function ensureSession() {
 function catalogUrl(metalId, page) {
   const u = new URL('/api/client/catalog', STONEX_BASE_URL);
   u.searchParams.append('metal_ids[]', String(metalId));
-  u.searchParams.append('misc[]', 'in_stock');
+  // BEZ in_stock filtru — stahujeme CELÝ katalog včetně vyprodaných.
+  // Vyprodaný produkt StoneX vede (jen 0 ks) → má zůstat jako předobjednávka,
+  // ne zmizet. Dostupnost čteme z odpovědi u každého produktu zvlášť.
   u.searchParams.append('page', String(page));
   return u.toString();
 }
@@ -487,6 +493,12 @@ async function fetchStoneXJsonRows() {
       for (const p of cat.products || []) {
         const code = String(p.part_number || '').trim();
         if (!code) continue;
+        // Reálná dostupnost z odpovědi (ne natvrdo). StoneX vrací počet kusů v některém
+        // z těchto polí; >0 = skladem, 0/chybí = vyprodáno (→ předobjednávka, ne smazat).
+        const qty = Number(
+          p.availability ?? p.available_quantity ?? p.quantity ?? p.stock ?? p.qty ?? 0
+        ) || 0;
+        const inStock = qty > 0;
         rows.push({
           productNumber: code, code,
           stonexName: p.name || '', name: p.name || '',
@@ -494,7 +506,7 @@ async function fetchStoneXJsonRows() {
           premiumValue: p.premium_value ?? null, premiumPercent: p.premium_percent ?? null,
           fineWeight: p.fine_weight, isCoin: !!p.is_coin,
           metalId: metal.id,
-          availability: 1, inStock: true,
+          availability: qty, inStock,
           metal: metal.name, source: 'stonex-json',
           weight: normalizeWeight(p.name || ''),
           mint: inferManufacturer(p.name || ''),
@@ -567,6 +579,27 @@ function normalizeStoneXToCzName(p) {
     : [manufacturer, series, metal, type, method, weight];
   return clean(parts.filter(Boolean).join(' '));
 }
+// Zkontroluje, jestli název už splňuje pravidla Heureky:
+// výrobce na PRVNÍM místě + obsahuje hmotnost (rozlišení varianty).
+function isHeurekaCompliantName(name, manufacturer) {
+  if (!name) return false;
+  const n = name.trim();
+  const m = (manufacturer || inferManufacturer(n)) || '';
+  // výrobce musí být na začátku názvu
+  const startsWithMfr = m && n.toLowerCase().startsWith(m.toLowerCase().split(' ')[0].toLowerCase());
+  // musí obsahovat hmotnost (g/kg/oz)
+  const hasWeight = /\d+\s*(g|kg|oz|gramů?|kilo)/i.test(n);
+  return Boolean(startsWithMfr && hasWeight);
+}
+
+// Sestaví název dle pravidel Heureky: VÝROBCE (první) → kov → typ → série → hmotnost → rok.
+// Heureka vyžaduje výrobce na prvním místě a rozlišení varianty (hmotnost/rok) v názvu.
+function heurekaName(p) {
+  // Využijeme stejnou logiku jako český název — ta už dává výrobce první + hmotnost.
+  const base = normalizeStoneXToCzName(p);
+  return base;
+}
+
 function compare(stonexRows, supplierRows, opts = {}) {
   const eurCzk = Number(opts.eurCzk || DEFAULT_EUR_CZK);
   const marginCzk = Number(opts.marginCzk ?? DEFAULT_MARGIN_CZK);
@@ -604,8 +637,13 @@ function compare(stonexRows, supplierRows, opts = {}) {
     // Když supplier název je, NEPŘEPISUJEME (necháme tvůj v Shoptetu).
     const hasSupplierName = Boolean(supplier?.name && supplier.name.trim());
     const genName = normalizeStoneXToCzName(s);
-    const base = { code, newName: hasSupplierName ? null : genName, newNameIsCzech: !hasSupplierName && Boolean(genName), supplierName: supplier?.name || '', stonexName: s.stonexName || s.name, mint: s.mint, weight: s.weight };
-    return { apply: Boolean(supplier && stonexCzk), code, matched: Boolean(supplier), matchMethod, stonexName: s.stonexName || s.name, suggestedName: normalizeStoneXToCzName(s), stonexUrl: s.url, productNumber: code, mint: s.mint, weight: s.weight, purity: s.purity, country: s.country, availability: s.availability, priceEur: s.priceEur, premiumEur: s.premiumEur, premiumPct: s.premiumPct, stonexCzk, supplierName: supplier?.name || '', supplierPrice: supplier?.price ?? null, supplierPurchasePrice: supplier?.purchasePrice ?? null, marginPct: effPct, diffPurchase: supplier && stonexCzk ? round((supplier.purchasePrice || 0) - stonexCzk, 2) : null, newPurchasePrice: stonexCzk || supplier?.purchasePrice || null, newPrice: proposedPrice || supplier?.price || null, newName: base.newName, newNameIsCzech: base.newNameIsCzech, newManufacturer: s.mint || inferManufacturer(s.stonexName || s.name), newAvailabilityIn: DEFAULT_IN_STOCK_TEXT, newAvailabilityOut: DEFAULT_OUT_OF_STOCK_TEXT, newWarehouseQty: s.availability && s.availability > 0 ? 1 : null, warehouseName: DEFAULT_WAREHOUSE, updatePurchasePrice: Boolean(stonexCzk), updatePrice: Boolean(stonexCzk && proposedPrice), updateCategory: true, category: inferCategory(base, '') };
+    // HEUREKA název: jen když stávající (Shoptet) název NESPLŇUJE pravidla Heureky.
+    // Když splňuje (výrobce první + hmotnost), necháme tvůj a Heureka tag = tvůj název.
+    const mfr = supplier?.mint || s.mint || inferManufacturer((hasSupplierName ? supplier.name : s.stonexName) || '');
+    const currentName = hasSupplierName ? supplier.name : '';
+    const heurekaNm = (currentName && isHeurekaCompliantName(currentName, mfr)) ? currentName : heurekaName(s);
+    const base = { code, newName: hasSupplierName ? null : genName, newNameIsCzech: !hasSupplierName && Boolean(genName), heurekaName: heurekaNm, supplierName: supplier?.name || '', stonexName: s.stonexName || s.name, mint: s.mint, weight: s.weight };
+    return { apply: Boolean(supplier && stonexCzk), code, matched: Boolean(supplier), matchMethod, stonexName: s.stonexName || s.name, suggestedName: normalizeStoneXToCzName(s), stonexUrl: s.url, productNumber: code, mint: s.mint, weight: s.weight, purity: s.purity, country: s.country, availability: s.availability, priceEur: s.priceEur, premiumEur: s.premiumEur, premiumPct: s.premiumPct, stonexCzk, supplierName: supplier?.name || '', supplierPrice: supplier?.price ?? null, supplierPurchasePrice: supplier?.purchasePrice ?? null, marginPct: effPct, diffPurchase: supplier && stonexCzk ? round((supplier.purchasePrice || 0) - stonexCzk, 2) : null, newPurchasePrice: stonexCzk || supplier?.purchasePrice || null, newPrice: proposedPrice || supplier?.price || null, newName: base.newName, newNameIsCzech: base.newNameIsCzech, heurekaName: base.heurekaName, newManufacturer: s.mint || inferManufacturer(s.stonexName || s.name), newAvailabilityIn: DEFAULT_IN_STOCK_TEXT, newAvailabilityOut: DEFAULT_OUT_OF_STOCK_TEXT, newWarehouseQty: s.inStock ? 1 : 0, warehouseName: DEFAULT_WAREHOUSE, updatePurchasePrice: Boolean(stonexCzk), updatePrice: Boolean(stonexCzk && proposedPrice), updateCategory: true, category: inferCategory(base, '') };
   });
 }
 
@@ -651,7 +689,7 @@ async function runFullCycle() {
 
   GENERATED_FEED = xml.replace(/\n\s*\n+/g, '\n');
   LAST_RUN = {
-    at: startedAt, finishedAt: new Date().toISOString(), codeVersion: 'drop-unmatched-2026-05-31',
+    at: startedAt, finishedAt: new Date().toISOString(), codeVersion: 'heureka-productname-2026-05-31',
     supplier: supplierRows.length, stonex: stonexRows.length,
     matched: rows.filter(r => r.matched).length, updated: updates.length,
     spotPriced, belowCostFixed, spot: null,
