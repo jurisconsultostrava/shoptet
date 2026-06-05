@@ -7,8 +7,9 @@ const axios = require('axios');
 const pdfParse = require('pdf-parse');
 const cron = require('node-cron');
 
-// Stav posledního automatického běhu + vygenerovaný feed (drží se v paměti).
+// Stav poslednĂ­ho automatickĂ©ho bÄ›hu + vygenerovanĂ˝ feed (drĹľĂ­ se v pamÄ›ti).
 let GENERATED_FEED = null;
+let GENERATED_HEUREKA_FEED = null;
 let LAST_RUN = null;
 
 const app = express();
@@ -20,29 +21,29 @@ const DEFAULT_EUR_CZK = Number(process.env.DEFAULT_EUR_CZK || 24.335);
 const DEFAULT_MARGIN_CZK = Number(process.env.DEFAULT_MARGIN_CZK || 1200);
 const DEFAULT_MARGIN_PERCENT = Number(process.env.DEFAULT_MARGIN_PERCENT || 0);
 const DEFAULT_WAREHOUSE = process.env.DEFAULT_WAREHOUSE || 'DE/CH';
-const DEFAULT_IN_STOCK_TEXT = process.env.DEFAULT_IN_STOCK_TEXT || 'Externí sklad / DE';
-const DEFAULT_OUT_OF_STOCK_TEXT = process.env.DEFAULT_OUT_OF_STOCK_TEXT || 'Předobjednávka / Fixace ceny';
+const DEFAULT_IN_STOCK_TEXT = process.env.DEFAULT_IN_STOCK_TEXT || 'ExternĂ­ sklad / DE';
+const DEFAULT_OUT_OF_STOCK_TEXT = process.env.DEFAULT_OUT_OF_STOCK_TEXT || 'PĹ™edobjednĂˇvka / Fixace ceny';
 const STONEX_BASE_URL = 'https://stonexbullion.com';
-// FLEXI varianta = CLASSIC cena se slevou (default 9 %). Konfigurovatelné přes Railway env.
+// FLEXI varianta = CLASSIC cena se slevou (default 9 %). KonfigurovatelnĂ© pĹ™es Railway env.
 const FLEXI_DISCOUNT_PERCENT = Number(process.env.FLEXI_DISCOUNT_PERCENT || 9);
-// Jak poznat FLEXI variantu podle kódu (kód končí na -FLEXI nebo /FLE).
+// Jak poznat FLEXI variantu podle kĂłdu (kĂłd konÄŤĂ­ na -FLEXI nebo /FLE).
 function isFlexiCode(code) { return /(-FLEXI|\/FLE)\s*$/i.test(String(code || '')); }
-// Automatické zakládání FLEXI varianty podle kategorie (lze vypnout env FLEXI_AUTO_CREATE=0).
+// AutomatickĂ© zaklĂˇdĂˇnĂ­ FLEXI varianty podle kategorie (lze vypnout env FLEXI_AUTO_CREATE=0).
 const FLEXI_AUTO_CREATE = process.env.FLEXI_AUTO_CREATE !== '0';
-// ID kategorií, kde se FLEXI varianta zakládá automaticky (Investiční zlato: 1 Oz, 50/100/250/500/1000 g).
-// Konfigurovatelné přes env FLEXI_CATEGORY_IDS="868,886,889,892,895,898" (čárkou oddělené ID).
+// ID kategoriĂ­, kde se FLEXI varianta zaklĂˇdĂˇ automaticky (InvestiÄŤnĂ­ zlato: 1 Oz, 50/100/250/500/1000 g).
+// KonfigurovatelnĂ© pĹ™es env FLEXI_CATEGORY_IDS="868,886,889,892,895,898" (ÄŤĂˇrkou oddÄ›lenĂ© ID).
 const FLEXI_CATEGORY_IDS = (process.env.FLEXI_CATEGORY_IDS || '868,886,889,892,895,898')
   .split(',').map(s => s.trim()).filter(Boolean);
-// Sufix kódu FLEXI varianty (musí odpovídat isFlexiCode).
+// Sufix kĂłdu FLEXI varianty (musĂ­ odpovĂ­dat isFlexiCode).
 const FLEXI_CODE_SUFFIX = process.env.FLEXI_CODE_SUFFIX || '-FLEXI';
-// Sklad FLEXI varianty (kusy na Výchozím skladu).
+// Sklad FLEXI varianty (kusy na VĂ˝chozĂ­m skladu).
 const FLEXI_STOCK_QTY = Number(process.env.FLEXI_STOCK_QTY || 10);
-// Název variantního parametru a hodnoty (musí ladit s tím, cos založil ručně).
-const FLEXI_PARAM_NAME = process.env.FLEXI_PARAM_NAME || 'cenová varianta';
-const FLEXI_VALUE_CLASSIC = process.env.FLEXI_VALUE_CLASSIC || 'základní';
+// NĂˇzev variantnĂ­ho parametru a hodnoty (musĂ­ ladit s tĂ­m, cos zaloĹľil ruÄŤnÄ›).
+const FLEXI_PARAM_NAME = process.env.FLEXI_PARAM_NAME || 'cenovĂˇ varianta';
+const FLEXI_VALUE_CLASSIC = process.env.FLEXI_VALUE_CLASSIC || 'zĂˇkladnĂ­';
 const FLEXI_VALUE_FLEXI = process.env.FLEXI_VALUE_FLEXI || 'FLEXI';
 
-// Patří produkt do cílové kategorie? Hledá <CATEGORY id="..."> v bloku.
+// PatĹ™Ă­ produkt do cĂ­lovĂ© kategorie? HledĂˇ <CATEGORY id="..."> v bloku.
 function isInFlexiCategory(block) {
   const ids = (String(block).match(/<CATEGORY\s+id="(\d+)"/gi) || [])
     .map(m => (m.match(/id="(\d+)"/) || [])[1]);
@@ -53,21 +54,21 @@ function isInFlexiCategory(block) {
 const OUNCE_G = 31.1035;
 let SPOT_CACHE = { czkPerGram: null, at: 0 };
 
-// Vrátí spot zlata v Kč/g (cache 10 min). Token z env GOLDAPI_TOKEN.
+// VrĂˇtĂ­ spot zlata v KÄŤ/g (cache 10 min). Token z env GOLDAPI_TOKEN.
 async function getGoldSpotCzkPerGram() {
   const now = Date.now();
   if (SPOT_CACHE.czkPerGram && (now - SPOT_CACHE.at) < 10 * 60 * 1000) {
     return SPOT_CACHE.czkPerGram;
   }
   const token = process.env.GOLDAPI_TOKEN;
-  if (!token) throw new Error('Chybí GOLDAPI_TOKEN pro spot zlata.');
+  if (!token) throw new Error('ChybĂ­ GOLDAPI_TOKEN pro spot zlata.');
   const r = await axios.get('https://www.goldapi.io/api/XAU/CZK', {
     headers: { 'x-access-token': token }, timeout: 20000, validateStatus: () => true,
   });
   if (r.status >= 400 || !r.data) throw new Error(`GoldAPI HTTP ${r.status}`);
-  // GoldAPI vrací price_gram_24k (Kč/g) nebo price (za unci)
+  // GoldAPI vracĂ­ price_gram_24k (KÄŤ/g) nebo price (za unci)
   const perGram = r.data.price_gram_24k || (r.data.price ? r.data.price / OUNCE_G : null);
-  if (!perGram) throw new Error('GoldAPI: nečekaná odpověď.');
+  if (!perGram) throw new Error('GoldAPI: neÄŤekanĂˇ odpovÄ›ÄŹ.');
   SPOT_CACHE = { czkPerGram: perGram, at: now };
   return perGram;
 }
@@ -105,30 +106,30 @@ const PRODUCT_NUMBER_BY_NAME = [
 ];
 
 const SHOP_CATEGORIES = {
-  GOLD: { id: '859', name: 'Investiční zlato' },
+  GOLD: { id: '859', name: 'InvestiÄŤnĂ­ zlato' },
   GOLD_BARS: {
-    '1 oz': { id: '868', name: 'Investiční zlato &gt; 1 Oz' },
-    '1 g': { id: '871', name: 'Investiční zlato &gt; 1 g' },
-    '2 g': { id: '874', name: 'Investiční zlato &gt; 2 g' },
-    '5 g': { id: '877', name: 'Investiční zlato &gt; 5 g' },
-    '10 g': { id: '880', name: 'Investiční zlato &gt; 10 g' },
-    '20 g': { id: '883', name: 'Investiční zlato &gt; 20 g' },
-    '50 g': { id: '886', name: 'Investiční zlato &gt; 50 g' },
-    '100 g': { id: '889', name: 'Investiční zlato &gt; 100 g' },
-    '250 g': { id: '892', name: 'Investiční zlato &gt; 250 g' },
-    '500 g': { id: '895', name: 'Investiční zlato &gt; 500 g' },
-    '1 kg': { id: '898', name: 'Investiční zlato &gt; 1000 g' }
+    '1 oz': { id: '868', name: 'InvestiÄŤnĂ­ zlato &gt; 1 Oz' },
+    '1 g': { id: '871', name: 'InvestiÄŤnĂ­ zlato &gt; 1 g' },
+    '2 g': { id: '874', name: 'InvestiÄŤnĂ­ zlato &gt; 2 g' },
+    '5 g': { id: '877', name: 'InvestiÄŤnĂ­ zlato &gt; 5 g' },
+    '10 g': { id: '880', name: 'InvestiÄŤnĂ­ zlato &gt; 10 g' },
+    '20 g': { id: '883', name: 'InvestiÄŤnĂ­ zlato &gt; 20 g' },
+    '50 g': { id: '886', name: 'InvestiÄŤnĂ­ zlato &gt; 50 g' },
+    '100 g': { id: '889', name: 'InvestiÄŤnĂ­ zlato &gt; 100 g' },
+    '250 g': { id: '892', name: 'InvestiÄŤnĂ­ zlato &gt; 250 g' },
+    '500 g': { id: '895', name: 'InvestiÄŤnĂ­ zlato &gt; 500 g' },
+    '1 kg': { id: '898', name: 'InvestiÄŤnĂ­ zlato &gt; 1000 g' }
   },
   GOLD_COINS: {
-    root: { id: '904', name: 'Investiční zlato &gt; Investiční zlaté mince' },
-    '1 oz': { id: '919', name: 'Investiční zlato &gt; Investiční zlaté mince &gt; 1 Oz' },
-    '1/2 oz': { id: '916', name: 'Investiční zlato &gt; Investiční zlaté mince &gt; 1/2 Oz' },
-    '1/4 oz': { id: '1170', name: 'Investiční zlato &gt; Investiční zlaté mince &gt; 1/4 Oz' }
+    root: { id: '904', name: 'InvestiÄŤnĂ­ zlato &gt; InvestiÄŤnĂ­ zlatĂ© mince' },
+    '1 oz': { id: '919', name: 'InvestiÄŤnĂ­ zlato &gt; InvestiÄŤnĂ­ zlatĂ© mince &gt; 1 Oz' },
+    '1/2 oz': { id: '916', name: 'InvestiÄŤnĂ­ zlato &gt; InvestiÄŤnĂ­ zlatĂ© mince &gt; 1/2 Oz' },
+    '1/4 oz': { id: '1170', name: 'InvestiÄŤnĂ­ zlato &gt; InvestiÄŤnĂ­ zlatĂ© mince &gt; 1/4 Oz' }
   },
-  SILVER_BARS: { id: '922', name: 'Investiční stříbro &gt; Investiční stříbrné slitky' },
-  SILVER_COINS: { id: '925', name: 'Investiční stříbro &gt; Investiční stříbrné mince' },
-  PLATINUM: { id: '928', name: 'Investiční platina a palladium &gt; Investiční platina' },
-  PALLADIUM: { id: '931', name: 'Investiční platina a palladium &gt; Investiční palladium' }
+  SILVER_BARS: { id: '922', name: 'InvestiÄŤnĂ­ stĹ™Ă­bro &gt; InvestiÄŤnĂ­ stĹ™Ă­brnĂ© slitky' },
+  SILVER_COINS: { id: '925', name: 'InvestiÄŤnĂ­ stĹ™Ă­bro &gt; InvestiÄŤnĂ­ stĹ™Ă­brnĂ© mince' },
+  PLATINUM: { id: '928', name: 'InvestiÄŤnĂ­ platina a palladium &gt; InvestiÄŤnĂ­ platina' },
+  PALLADIUM: { id: '931', name: 'InvestiÄŤnĂ­ platina a palladium &gt; InvestiÄŤnĂ­ palladium' }
 };
 
 function requireAuth(req, res, next) {
@@ -168,7 +169,7 @@ function normalizeWeight(s) {
   return '';
 }
 
-// Hmotnost v gramech z textu (pro marži dle hmotnosti, když StoneX fine_weight chybí).
+// Hmotnost v gramech z textu (pro marĹľi dle hmotnosti, kdyĹľ StoneX fine_weight chybĂ­).
 function weightGrams(t) {
   if (!t) return null;
   const low = String(t).toLowerCase();
@@ -217,8 +218,8 @@ function productKeyFromText(value) {
   return [maker, metal, type, weight, series].filter(Boolean).join('|');
 }
 
-// Přečte SPRÁVNÝ <CODE> produktu — odstraní related/alternative/flags sekce,
-// které mají vlastní <CODE> a jinak by se chytl cizí kód.
+// PĹ™eÄŤte SPRĂVNĂť <CODE> produktu â€” odstranĂ­ related/alternative/flags sekce,
+// kterĂ© majĂ­ vlastnĂ­ <CODE> a jinak by se chytl cizĂ­ kĂłd.
 function productCode(block) {
   let nf = String(block || '');
   nf = nf.replace(/<RELATED_PRODUCTS>[\s\S]*?<\/RELATED_PRODUCTS>/gi, '');
@@ -234,7 +235,7 @@ function parseSupplierXml(xml) {
     const manufacturer = textBetween(block, 'MANUFACTURER');
     const price = parseNumber(textBetween(block, 'PRICE'));
     const purchasePrice = parseNumber(textBetween(block, 'PURCHASE_PRICE'));
-    // Původní marže v % = (prodejní - nákupní) / nákupní * 100. Použije se × coef.
+    // PĹŻvodnĂ­ marĹľe v % = (prodejnĂ­ - nĂˇkupnĂ­) / nĂˇkupnĂ­ * 100. PouĹľije se Ă— coef.
     let marginPercent = null;
     if (price != null && purchasePrice != null && purchasePrice > 0) {
       marginPercent = ((price - purchasePrice) / purchasePrice) * 100;
@@ -275,75 +276,75 @@ function categoriesXml(cat) { return cat ? `<CATEGORIES><CATEGORY id="${cat.id}"
 function replaceCategories(block, cat) {
   if (!cat) return block;
   const xml = categoriesXml(cat);
-  // Kategorii doplníme JEN novému produktu (žádnou nemá). Existující zařazení nepřepisujeme.
+  // Kategorii doplnĂ­me JEN novĂ©mu produktu (ĹľĂˇdnou nemĂˇ). ExistujĂ­cĂ­ zaĹ™azenĂ­ nepĹ™episujeme.
   const m = block.match(/<CATEGORIES>([\s\S]*?)<\/CATEGORIES>/i);
   if (m) {
-    const hasCategory = /<CATEGORY[\s>]/i.test(m[1]);  // obsahuje aspoň jednu kategorii?
-    if (hasCategory) return block;                      // už zařazeno → nech být
-    return block.replace(/<CATEGORIES>[\s\S]*?<\/CATEGORIES>/i, xml);  // prázdné → doplň
+    const hasCategory = /<CATEGORY[\s>]/i.test(m[1]);  // obsahuje aspoĹ jednu kategorii?
+    if (hasCategory) return block;                      // uĹľ zaĹ™azeno â†’ nech bĂ˝t
+    return block.replace(/<CATEGORIES>[\s\S]*?<\/CATEGORIES>/i, xml);  // prĂˇzdnĂ© â†’ doplĹ
   }
-  // CATEGORIES blok chybí → doplň
+  // CATEGORIES blok chybĂ­ â†’ doplĹ
   if (/<ITEM_TYPE>[\s\S]*?<\/ITEM_TYPE>/i.test(block)) return block.replace(/(<ITEM_TYPE>[\s\S]*?<\/ITEM_TYPE>)/i, `$1${xml}`);
   return block.replace(/<\/SHOPITEM>/i, `\n${xml}\n</SHOPITEM>`);
 }
 function inferCategory(update, block = '') {
   const text = clean(`${update.newName || ''} ${update.supplierName || ''} ${update.stonexName || ''} ${textBetween(block, 'NAME')} ${update.mint || ''}`).toLowerCase();
   const weight = normalizeWeight(`${update.weight || ''} ${text}`);
-  const isCoin = /mince|coin|krugerrand|britannia|maple|philharmoniker|kangaroo|kookaburra|koala|lunar|eagle|buffalo|panda|ducat|dukát|noah|ark|libertad/.test(text);
+  const isCoin = /mince|coin|krugerrand|britannia|maple|philharmoniker|kangaroo|kookaburra|koala|lunar|eagle|buffalo|panda|ducat|dukĂˇt|noah|ark|libertad/.test(text);
   if (/palladium|palladi/.test(text)) return SHOP_CATEGORIES.PALLADIUM;
   if (/platinum|platina|platin/.test(text)) return SHOP_CATEGORIES.PLATINUM;
-  if (/silver|stříbr|stribr/.test(text)) return isCoin ? SHOP_CATEGORIES.SILVER_COINS : SHOP_CATEGORIES.SILVER_BARS;
+  if (/silver|stĹ™Ă­br|stribr/.test(text)) return isCoin ? SHOP_CATEGORIES.SILVER_COINS : SHOP_CATEGORIES.SILVER_BARS;
   if (/gold|zlat/.test(text)) return isCoin ? (SHOP_CATEGORIES.GOLD_COINS[weight] || SHOP_CATEGORIES.GOLD_COINS.root) : (SHOP_CATEGORIES.GOLD_BARS[weight] || SHOP_CATEGORIES.GOLD);
   return null;
 }
-// Z jednoduchého produktu (bez <VARIANTS>) v cílové kategorii vytvoří produkt
-// se dvěma variantami: CLASSIC (původní data) + FLEXI (kód+sufix, cena −sleva, sklad FLEXI_STOCK_QTY).
-// Struktura variant kopíruje tělo produktu, takže odpovídá tomu, co generuje Shoptet.
-// Vrací { block, created }. Pokud nelze/nemá smysl, vrací created=false a blok beze změny.
+// Z jednoduchĂ©ho produktu (bez <VARIANTS>) v cĂ­lovĂ© kategorii vytvoĹ™Ă­ produkt
+// se dvÄ›ma variantami: CLASSIC (pĹŻvodnĂ­ data) + FLEXI (kĂłd+sufix, cena â’sleva, sklad FLEXI_STOCK_QTY).
+// Struktura variant kopĂ­ruje tÄ›lo produktu, takĹľe odpovĂ­dĂˇ tomu, co generuje Shoptet.
+// VracĂ­ { block, created }. Pokud nelze/nemĂˇ smysl, vracĂ­ created=false a blok beze zmÄ›ny.
 function ensureFlexiVariant(block) {
   if (!FLEXI_AUTO_CREATE) return { block, created: false };
-  if (/<VARIANTS>/i.test(block)) return { block, created: false };   // už má varianty
-  if (!isInFlexiCategory(block)) return { block, created: false };   // mimo cílovou kategorii
+  if (/<VARIANTS>/i.test(block)) return { block, created: false };   // uĹľ mĂˇ varianty
+  if (!isInFlexiCategory(block)) return { block, created: false };   // mimo cĂ­lovou kategorii
   const code = productCode(block);
   if (!code) return { block, created: false };
   const basePrice = parseNumber(textBetween(block, 'PRICE'));
   if (basePrice == null) return { block, created: false };
   const flexiPrice = Math.round(basePrice * (1 - FLEXI_DISCOUNT_PERCENT / 100));
 
-  // "Jádro" varianty = tělo produktu od <UNIT> po konec (před </SHOPITEM>),
-  // bez hlavičkových sekcí (NAME/CATEGORIES/IMAGES/FLAGS apod.), které zůstávají na produktu.
+  // "JĂˇdro" varianty = tÄ›lo produktu od <UNIT> po konec (pĹ™ed </SHOPITEM>),
+  // bez hlaviÄŤkovĂ˝ch sekcĂ­ (NAME/CATEGORIES/IMAGES/FLAGS apod.), kterĂ© zĹŻstĂˇvajĂ­ na produktu.
   const coreMatch = block.match(/<UNIT>[\s\S]*?(?=<\/SHOPITEM>)/i);
   const core = coreMatch ? coreMatch[0] : `<UNIT>ks</UNIT><CODE>${escapeXml(code)}</CODE><CURRENCY>CZK</CURRENCY><PRICE>${Math.round(basePrice)}</PRICE>`;
 
   const paramXml = `<PARAMETERS><PARAMETER><NAME>${escapeXml(FLEXI_PARAM_NAME)}</NAME><VALUE>${escapeXml(FLEXI_VALUE_CLASSIC)}</VALUE></PARAMETER></PARAMETERS>`;
   const paramXmlFlexi = `<PARAMETERS><PARAMETER><NAME>${escapeXml(FLEXI_PARAM_NAME)}</NAME><VALUE>${escapeXml(FLEXI_VALUE_FLEXI)}</VALUE></PARAMETER></PARAMETERS>`;
 
-  // CLASSIC varianta = jádro + parametr "základní"
+  // CLASSIC varianta = jĂˇdro + parametr "zĂˇkladnĂ­"
   let classicCore = core + paramXml;
-  // FLEXI varianta = jádro s upraveným kódem, cenou a skladem + parametr "FLEXI"
+  // FLEXI varianta = jĂˇdro s upravenĂ˝m kĂłdem, cenou a skladem + parametr "FLEXI"
   let flexiCore = core;
   flexiCore = replaceTag(flexiCore, 'CODE', code + FLEXI_CODE_SUFFIX, true);
   flexiCore = replaceTag(flexiCore, 'PRICE', String(flexiPrice), true);
   flexiCore = replaceWarehouseQty(flexiCore, DEFAULT_WAREHOUSE, FLEXI_STOCK_QTY);
-  flexiCore = replaceWarehouseQty(flexiCore, 'Výchozí sklad', FLEXI_STOCK_QTY);
+  flexiCore = replaceWarehouseQty(flexiCore, 'VĂ˝chozĂ­ sklad', FLEXI_STOCK_QTY);
   flexiCore = flexiCore + paramXmlFlexi;
 
   const variantsXml = `<VARIANTS><VARIANT>${classicCore}</VARIANT><VARIANT>${flexiCore}</VARIANT></VARIANTS>`;
 
-  // Tělo produktu (od <UNIT> dál) nahradíme blokem <VARIANTS>. Hlavička (NAME, CATEGORIES, ...) zůstává.
+  // TÄ›lo produktu (od <UNIT> dĂˇl) nahradĂ­me blokem <VARIANTS>. HlaviÄŤka (NAME, CATEGORIES, ...) zĹŻstĂˇvĂˇ.
   const newBlock = block.replace(/<UNIT>[\s\S]*?(?=<\/SHOPITEM>)/i, variantsXml);
   return { block: newBlock, created: true };
 }
 
-// Přecení varianty uvnitř produktu (produkt s variantami).
-// - Pokud je basePrice zadané: CLASSIC varianta dostane basePrice (nová cena ze StoneX).
-// - Pokud basePrice == null: CLASSIC se nemění, vezme se její STÁVAJÍCÍ cena z bloku.
-// FLEXI varianta (kód končí -FLEXI / /FLE) VŽDY = classic cena − FLEXI_DISCOUNT_PERCENT.
-// Tím je flexi vždy správně, i když se classic zrovna nepřeceňuje.
-// Vrací { block, changed }; pokud blok nemá <VARIANTS>, vrací changed=false.
+// PĹ™ecenĂ­ varianty uvnitĹ™ produktu (produkt s variantami).
+// - Pokud je basePrice zadanĂ©: CLASSIC varianta dostane basePrice (novĂˇ cena ze StoneX).
+// - Pokud basePrice == null: CLASSIC se nemÄ›nĂ­, vezme se jejĂ­ STĂVAJĂŤCĂŤ cena z bloku.
+// FLEXI varianta (kĂłd konÄŤĂ­ -FLEXI / /FLE) VĹ˝DY = classic cena â’ FLEXI_DISCOUNT_PERCENT.
+// TĂ­m je flexi vĹľdy sprĂˇvnÄ›, i kdyĹľ se classic zrovna nepĹ™eceĹuje.
+// VracĂ­ { block, changed }; pokud blok nemĂˇ <VARIANTS>, vracĂ­ changed=false.
 function repriceVariants(block, basePrice) {
   if (!/<VARIANTS>/i.test(block)) return { block, changed: false };
-  // Zjisti CLASSIC cenu: buď nová (basePrice), nebo stávající z první ne-flexi varianty.
+  // Zjisti CLASSIC cenu: buÄŹ novĂˇ (basePrice), nebo stĂˇvajĂ­cĂ­ z prvnĂ­ ne-flexi varianty.
   let classicPrice = (basePrice != null) ? Math.round(Number(basePrice)) : null;
   if (classicPrice == null) {
     for (const m of block.matchAll(/<VARIANT\b[\s\S]*?<\/VARIANT>/gi)) {
@@ -360,7 +361,7 @@ function repriceVariants(block, basePrice) {
   const out = block.replace(/<VARIANT\b[\s\S]*?<\/VARIANT>/gi, vBlock => {
     const vCode = textBetween(vBlock, 'CODE');
     if (isFlexiCode(vCode)) { changed = true; return replaceTag(vBlock, 'PRICE', String(flexiPrice), true); }
-    // CLASSIC: měň jen když přišla nová cena; jinak nech beze změny.
+    // CLASSIC: mÄ›Ĺ jen kdyĹľ pĹ™iĹˇla novĂˇ cena; jinak nech beze zmÄ›ny.
     if (basePrice != null) { changed = true; return replaceTag(vBlock, 'PRICE', String(classicPrice), true); }
     return vBlock;
   });
@@ -374,9 +375,9 @@ function updateXmlByCode(originalXml, updates, dropUnmatched = false) {
     const ef = ensureFlexiVariant(rawBlock);
     const block = ef.block;
     const u = byCode.get(String(productCode(block)));
-    // Nespárovaný produkt (StoneX nemá teď skladem): nechat ve feedu beze změny ceny,
-    // ALE pojistka — když je prodejní cena pod nákupní, zvednout ji nad nákup (+1 %),
-    // ať se nikdy neprodává se ztrátou (i u nespárovaných, co drží starou cenu).
+    // NespĂˇrovanĂ˝ produkt (StoneX nemĂˇ teÄŹ skladem): nechat ve feedu beze zmÄ›ny ceny,
+    // ALE pojistka â€” kdyĹľ je prodejnĂ­ cena pod nĂˇkupnĂ­, zvednout ji nad nĂˇkup (+1 %),
+    // aĹĄ se nikdy neprodĂˇvĂˇ se ztrĂˇtou (i u nespĂˇrovanĂ˝ch, co drĹľĂ­ starou cenu).
     if (!u || !u.apply) {
       if (dropUnmatched) return '';
       let b = block;
@@ -385,23 +386,23 @@ function updateXmlByCode(originalXml, updates, dropUnmatched = false) {
       if (curPrice && curPurchase && curPrice < curPurchase) {
         b = replaceTag(b, 'PRICE', String(Math.round(curPurchase * 1.01)), true);
       }
-      // I u nepřeceněného produktu srovnej FLEXI variantu na classic − sleva,
-      // ať flexi nikdy nezůstane viset na staré/stejné ceně jako classic.
+      // I u nepĹ™ecenÄ›nĂ©ho produktu srovnej FLEXI variantu na classic â’ sleva,
+      // aĹĄ flexi nikdy nezĹŻstane viset na starĂ©/stejnĂ© cenÄ› jako classic.
       const rv = repriceVariants(b, null);
       if (rv.changed) b = rv.block;
       return b;
     }
     let out = block;
-    // Název přepíšeme JEN tvým českým (ze supplier XML). Anglické StoneX názvy ani
-    // generované překlady do feedu nepouštíme — necháme název, co je v Shoptetu.
+    // NĂˇzev pĹ™epĂ­Ĺˇeme JEN tvĂ˝m ÄŤeskĂ˝m (ze supplier XML). AnglickĂ© StoneX nĂˇzvy ani
+    // generovanĂ© pĹ™eklady do feedu nepouĹˇtĂ­me â€” nechĂˇme nĂˇzev, co je v Shoptetu.
     if (u.newName && u.newNameIsCzech) out = replaceTag(out, 'NAME', u.newName, true);
-    // PRODUCTNAME (Heureka) NEPŘEPISUJEME — přepis vytvářel unikátní názvy, na které
-    // Heureka zakládala nové karty (kde jsi sama) místo napárování na existující karty.
-    // Necháváme původní název ze Shoptetu, ať Heureka páruje normálně.
+    // PRODUCTNAME (Heureka) NEPĹEPISUJEME â€” pĹ™epis vytvĂˇĹ™el unikĂˇtnĂ­ nĂˇzvy, na kterĂ©
+    // Heureka zaklĂˇdala novĂ© karty (kde jsi sama) mĂ­sto napĂˇrovĂˇnĂ­ na existujĂ­cĂ­ karty.
+    // NechĂˇvĂˇme pĹŻvodnĂ­ nĂˇzev ze Shoptetu, aĹĄ Heureka pĂˇruje normĂˇlnÄ›.
     if (u.updatePurchasePrice && u.newPurchasePrice !== null && u.newPurchasePrice !== undefined) out = replaceTag(out, 'PURCHASE_PRICE', String(u.newPurchasePrice), true);
     if (u.updatePrice && u.newPrice !== null && u.newPrice !== undefined) {
-      // Produkt s variantami: přeceň CLASSIC i FLEXI variantu zvlášť (FLEXI = -sleva).
-      // Jinak by replaceTag přepsal jen první <PRICE> a rozhodil ceny variant.
+      // Produkt s variantami: pĹ™eceĹ CLASSIC i FLEXI variantu zvlĂˇĹˇĹĄ (FLEXI = -sleva).
+      // Jinak by replaceTag pĹ™epsal jen prvnĂ­ <PRICE> a rozhodil ceny variant.
       const rv = repriceVariants(out, Number(u.newPrice));
       if (rv.changed) out = rv.block;
       else out = replaceTag(out, 'PRICE', String(u.newPrice), true);
@@ -437,10 +438,10 @@ async function fetchStoneXPdfRows(inputUrl) {
   return rows;
 }
 
-// Z PDF katalogu (catalog-search) vytáhne premium % pro každý produkt podle hmotnosti.
-// Řádek PDF: "<název> ... <WE SELL Kč> <premium%> <váha>g". Vrací pole {name, weight, premiumPct}.
+// Z PDF katalogu (catalog-search) vytĂˇhne premium % pro kaĹľdĂ˝ produkt podle hmotnosti.
+// ĹĂˇdek PDF: "<nĂˇzev> ... <WE SELL KÄŤ> <premium%> <vĂˇha>g". VracĂ­ pole {name, weight, premiumPct}.
 async function fetchStoneXPremiumRows() {
-  // Stáhne PDF přes přihlášenou session (catalog-search PDF endpoint).
+  // StĂˇhne PDF pĹ™es pĹ™ihlĂˇĹˇenou session (catalog-search PDF endpoint).
   const cookies = (process.env.STONEX_USER && process.env.STONEX_PASS) ? await ensureSession() : null;
   const url = 'https://stonexbullion.com/api/client/catalog/pdf/?t=' + Date.now() + '&url=%2Fen%2Fgold%2F&update_filters=true&metal_ids%5B%5D=1&term=&page=1';
   const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000, validateStatus: () => true,
@@ -449,21 +450,21 @@ async function fetchStoneXPremiumRows() {
   const parsed = await pdfParse(Buffer.from(r.data));
   const text = parsed.text || '';
   const out = [];
-  // Hledá: ... <číslo s mezerami>,<dd> Kč <premium>% <váha>g  (poslední premium% před váhou = WE SELL premium)
-  const lineRe = /([0-9][0-9 ]*[.,][0-9]{2})\s*Kč\s+(-?\d+[.,]\d+)%\s+([\d.,]+)\s*g/g;
-  // Projdeme po řádcích, vezmeme název = text před první "Kč" částkou
+  // HledĂˇ: ... <ÄŤĂ­slo s mezerami>,<dd> KÄŤ <premium>% <vĂˇha>g  (poslednĂ­ premium% pĹ™ed vĂˇhou = WE SELL premium)
+  const lineRe = /([0-9][0-9 ]*[.,][0-9]{2})\s*KÄŤ\s+(-?\d+[.,]\d+)%\s+([\d.,]+)\s*g/g;
+  // Projdeme po Ĺ™ĂˇdcĂ­ch, vezmeme nĂˇzev = text pĹ™ed prvnĂ­ "KÄŤ" ÄŤĂˇstkou
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     if (!line) continue;
-    // poslední výskyt "premium% váhag" na řádku = WE SELL
+    // poslednĂ­ vĂ˝skyt "premium% vĂˇhag" na Ĺ™Ăˇdku = WE SELL
     let m, last = null;
     const re = /(-?\d+[.,]\d+)%\s+([\d.,]+)\s*g\b/g;
     while ((m = re.exec(line)) !== null) last = m;
     if (!last) continue;
     const premiumPct = parseFloat(last[1].replace(',', '.'));
     const weight = parseFloat(last[2].replace(',', '.'));
-    // název = část řádku před první číslicí ceny/percenta
-    const name = line.replace(/\s*-?[\d  ][\d  .,]*\s*Kč.*$/, '').replace(/\s+\d.*$/, '').trim() || line.slice(0, 40);
+    // nĂˇzev = ÄŤĂˇst Ĺ™Ăˇdku pĹ™ed prvnĂ­ ÄŤĂ­slicĂ­ ceny/percenta
+    const name = line.replace(/\s*-?[\d  ][\d  .,]*\s*KÄŤ.*$/, '').replace(/\s+\d.*$/, '').trim() || line.slice(0, 40);
     if (weight > 0 && !isNaN(premiumPct)) out.push({ name, weight, premiumPct });
   }
   return out;
@@ -471,11 +472,11 @@ async function fetchStoneXPremiumRows() {
 
 // --- JSON katalog endpoint (part_number + gross_price) ---
 // Endpoint: /api/client/catalog?metal_ids[]=N&misc[]=in_stock&page=P
-// Vrací { status:'Success', data:{ catalog:{ products:[...], paginator:{last_page} } } }
+// VracĂ­ { status:'Success', data:{ catalog:{ products:[...], paginator:{last_page} } } }
 const STONEX_METALS = [{ id: 1, name: 'gold' }, { id: 2, name: 'silver' }, { id: 3, name: 'platinum' }, { id: 4, name: 'palladium' }];
 
 // ====== AUTO-LOGIN (session management) ======
-// Drží cookies v paměti; když katalog vrátí invalid_method/401, zkusí se znovu přihlásit.
+// DrĹľĂ­ cookies v pamÄ›ti; kdyĹľ katalog vrĂˇtĂ­ invalid_method/401, zkusĂ­ se znovu pĹ™ihlĂˇsit.
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 let SESSION = { cookies: {}, loggedInAt: null };
 
@@ -493,36 +494,36 @@ function mergeSetCookie(jar, setCookie) {
 }
 function decode(v) { try { return decodeURIComponent(v); } catch { return v; } }
 
-// Přihlášení: GET login (CSRF + cookies) -> POST credentials -> session cookies.
+// PĹ™ihlĂˇĹˇenĂ­: GET login (CSRF + cookies) -> POST credentials -> session cookies.
 async function stonexLogin() {
   const user = process.env.STONEX_USER, pass = process.env.STONEX_PASS;
-  if (!user || !pass) throw new Error('Chybí STONEX_USER / STONEX_PASS v Railway Variables.');
+  if (!user || !pass) throw new Error('ChybĂ­ STONEX_USER / STONEX_PASS v Railway Variables.');
 
   const jar = {};
   const H = () => ({ 'User-Agent': BROWSER_UA, 'Accept': 'text/html,application/xhtml+xml,*/*',
     'Accept-Language': 'cs-CZ,cs;q=0.9,en;q=0.8', 'Cookie': cookieHeader(jar) });
 
-  // 1) GET login stránku — získá XSRF-TOKEN + session cookie + CSRF token z HTML
+  // 1) GET login strĂˇnku â€” zĂ­skĂˇ XSRF-TOKEN + session cookie + CSRF token z HTML
   const loginUrl = STONEX_BASE_URL + '/en/login/';
   const g = await axios.get(loginUrl, { headers: H(), timeout: 30000, validateStatus: () => true, maxRedirects: 5 });
   mergeSetCookie(jar, g.headers['set-cookie']);
 
-  // CSRF token bývá v <meta name="csrf-token"> nebo v hidden inputu _token
+  // CSRF token bĂ˝vĂˇ v <meta name="csrf-token"> nebo v hidden inputu _token
   let csrf = '';
   const html = typeof g.data === 'string' ? g.data : '';
   let m = html.match(/<meta name="csrf-token" content="([^"]+)"/i)
        || html.match(/name="_token"[^>]*value="([^"]+)"/i);
   if (m) csrf = m[1];
-  // fallback: XSRF-TOKEN cookie (Laravel) — dekódovaná
+  // fallback: XSRF-TOKEN cookie (Laravel) â€” dekĂłdovanĂˇ
   if (!csrf && jar['XSRF-TOKEN']) csrf = decode(jar['XSRF-TOKEN']);
 
-  // 2) POST přihlášení
+  // 2) POST pĹ™ihlĂˇĹˇenĂ­
   const postHeaders = { 'User-Agent': BROWSER_UA, 'Accept': 'application/json, text/plain, */*',
     'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest',
     'Referer': loginUrl, 'Origin': STONEX_BASE_URL, 'Cookie': cookieHeader(jar) };
   if (csrf) { postHeaders['X-XSRF-TOKEN'] = csrf; postHeaders['X-CSRF-TOKEN'] = csrf; }
 
-  // Zkusíme běžné login endpointy/políčka (Laravel varianty)
+  // ZkusĂ­me bÄ›ĹľnĂ© login endpointy/polĂ­ÄŤka (Laravel varianty)
   const candidates = [
     { url: STONEX_BASE_URL + '/api/client/login', body: { email: user, password: pass } },
     { url: STONEX_BASE_URL + '/api/client/auth/login', body: { email: user, password: pass } },
@@ -535,7 +536,7 @@ async function stonexLogin() {
       const r = await axios.post(c.url, c.body, { headers: { ...postHeaders, 'Cookie': cookieHeader(jar) },
         timeout: 30000, validateStatus: () => true, maxRedirects: 0 });
       mergeSetCookie(jar, r.headers['set-cookie']);
-      // úspěch poznáme tak, že máme novou session cookie a status < 400 (nebo redirect 302)
+      // ĂşspÄ›ch poznĂˇme tak, Ĺľe mĂˇme novou session cookie a status < 400 (nebo redirect 302)
       if ((r.status < 400 || r.status === 302) && (jar['frontend_session'] || jar['laravel_session'])) {
         SESSION = { cookies: jar, loggedInAt: new Date().toISOString() };
         return SESSION;
@@ -543,7 +544,7 @@ async function stonexLogin() {
       lastErr = `${c.url.split('/').pop()}: HTTP ${r.status} ${r.data?.message || r.data?.code || ''}`;
     } catch (e) { lastErr = e.message; }
   }
-  throw new Error(`StoneX login selhal. Poslední: ${lastErr}. Možná jiný login endpoint — viz /api/diag-login.`);
+  throw new Error(`StoneX login selhal. PoslednĂ­: ${lastErr}. MoĹľnĂˇ jinĂ˝ login endpoint â€” viz /api/diag-login.`);
 }
 
 async function ensureSession() {
@@ -561,7 +562,7 @@ function catalogUrl(metalId, page, inStockOnly = false) {
   return u.toString();
 }
 
-// Zkusí stáhnout katalog s aktuální session; při selhání se přihlásí znovu a opakuje.
+// ZkusĂ­ stĂˇhnout katalog s aktuĂˇlnĂ­ session; pĹ™i selhĂˇnĂ­ se pĹ™ihlĂˇsĂ­ znovu a opakuje.
 async function fetchCatalogJson(url) {
   const doFetch = async (cookies) => {
     const headers = {
@@ -581,12 +582,12 @@ async function fetchCatalogJson(url) {
 
   const ok = (r) => r.status < 400 && r.data?.status === 'Success' && r.data.data?.catalog;
 
-  // 1) pokud máme STONEX_USER/PASS, použij auto-login session
+  // 1) pokud mĂˇme STONEX_USER/PASS, pouĹľij auto-login session
   if (process.env.STONEX_USER && process.env.STONEX_PASS) {
     let cookies = await ensureSession();
     let r = await doFetch(cookies);
     if (ok(r)) return r.data.data.catalog;
-    // session nejspíš vypršela -> přihlas znovu a zkus jednou
+    // session nejspĂ­Ĺˇ vyprĹˇela -> pĹ™ihlas znovu a zkus jednou
     SESSION = { cookies: {}, loggedInAt: null };
     cookies = await ensureSession();
     r = await doFetch(cookies);
@@ -594,7 +595,7 @@ async function fetchCatalogJson(url) {
     throw new Error(`StoneX katalog: ${r.status} ${r.data?.code || ''} (po re-loginu)`);
   }
 
-  // 2) fallback na ruční STONEX_COOKIE
+  // 2) fallback na ruÄŤnĂ­ STONEX_COOKIE
   const r = await doFetch(null);
   if (ok(r)) return r.data.data.catalog;
   throw new Error(`StoneX katalog: ${r.status} ${r.data?.code || ''} (zkontroluj STONEX_COOKIE nebo nastav STONEX_USER/PASS)`);
@@ -603,18 +604,18 @@ async function fetchCatalogJson(url) {
 async function fetchStoneXJsonRows() {
   const rows = [];
   for (const metal of STONEX_METALS) {
-    // in_stock filtr → JEN skladové produkty. Quantity čteme z reálných polí pro počet kusů.
+    // in_stock filtr â†’ JEN skladovĂ© produkty. Quantity ÄŤteme z reĂˇlnĂ˝ch polĂ­ pro poÄŤet kusĹŻ.
     let page = 1, last = 1;
     do {
       const cat = await fetchCatalogJson(catalogUrl(metal.id, page, true));
       for (const p of cat.products || []) {
         const code = String(p.part_number || '').trim();
         if (!code) continue;
-        // Dostupnost z reálných polí StoneX JSON:
-        //   p.availability.code === 'in_stock'  → skladem
-        //   p.availability.quantity            → počet kusů
-        //   p.shop_availability (bool)         → zobrazit v shopu
-        //   p.pre_sale (bool)                  → předobjednávka
+        // Dostupnost z reĂˇlnĂ˝ch polĂ­ StoneX JSON:
+        //   p.availability.code === 'in_stock'  â†’ skladem
+        //   p.availability.quantity            â†’ poÄŤet kusĹŻ
+        //   p.shop_availability (bool)         â†’ zobrazit v shopu
+        //   p.pre_sale (bool)                  â†’ pĹ™edobjednĂˇvka
         const av = p.availability || {};
         const avQty = Number(av.quantity || 0) || 0;
         const inStock = (av.code === 'in_stock') || (p.shop_availability === true && avQty > 0);
@@ -648,7 +649,7 @@ function productNumberFromName(name) {
 }
 function cleanStoneXName(raw) {
   let s = clean(raw);
-  const cut = s.search(/-?\d[\d.,\s]*\s*€|\d[\d.,]*\s*%/);
+  const cut = s.search(/-?\d[\d.,\s]*\s*â‚¬|\d[\d.,]*\s*%/);
   if (cut > 5) s = s.slice(0, cut);
   s = s.replace(/Argor-Heraus/gi, 'Argor-Heraeus');
   s = s.replace(/\s+\|\s+/g, ' | ');
@@ -660,10 +661,10 @@ function parseStoneXPdfText(text, sourceUrl) {
   for (let i=0; i<lines.length; i++) {
     const chunk = clean([lines[i], lines[i+1] || '', lines[i+2] || '', lines[i+3] || ''].join(' '));
     if (!/(gold|silver|platinum|palladium).*(bar|coin)|(bar|coin).*(gold|silver|platinum|palladium)|combibar/i.test(chunk)) continue;
-    if (!/€|%/.test(chunk)) continue;
+    if (!/â‚¬|%/.test(chunk)) continue;
     const name = cleanStoneXName(chunk);
     if (!name || name.length < 8 || !/(gold|silver|platinum|palladium|bar|coin|combibar)/i.test(name)) continue;
-    const euros = [...chunk.matchAll(/(-?[0-9][0-9.,\s]*?)\s*€/g)].map(m => parseNumber(m[1])).filter(v => v !== null);
+    const euros = [...chunk.matchAll(/(-?[0-9][0-9.,\s]*?)\s*â‚¬/g)].map(m => parseNumber(m[1])).filter(v => v !== null);
     const percent = [...chunk.matchAll(/(-?[0-9]+(?:[.,][0-9]+)?)\s*%/g)].map(m => parseNumber(m[1])).filter(v => v !== null);
     const weightMatch = chunk.match(/(\d+(?:[.,]\d+)?)\s*g/i) || chunk.match(/(1\/10|1\/4|1\/2|1)\s*oz/i);
     const code = productNumberFromName(name);
@@ -676,47 +677,47 @@ function normalizeStoneXToCzName(p) {
   const name = `${p.stonexName || p.name || ''} ${p.mint || ''}`;
   const lower = name.toLowerCase();
   const manufacturer = p.mint || inferManufacturer(name);
-  const isCoinType = /coin|krugerrand|britannia|kangaroo|maple|philharmoniker|eagle|buffalo|lunar|koala|panda|sovereign|ducat|dukát|libertad|corona|franc|peso/i.test(name);
+  const isCoinType = /coin|krugerrand|britannia|kangaroo|maple|philharmoniker|eagle|buffalo|lunar|koala|panda|sovereign|ducat|dukĂˇt|libertad|corona|franc|peso/i.test(name);
   const type = isCoinType ? 'mince' : 'slitek';
-  let metal = type === 'mince' ? 'zlatá' : 'zlatý';
-  if (/silver/.test(lower)) metal = type === 'mince' ? 'stříbrná' : 'stříbrný';
-  if (/platinum/.test(lower)) metal = type === 'mince' ? 'platinová' : 'platinový';
-  if (/palladium/.test(lower)) metal = type === 'mince' ? 'palladiová' : 'palladiový';
-  // způsob ražby: Minted → ražený, Casted → litý (jen u slitků)
+  let metal = type === 'mince' ? 'zlatĂˇ' : 'zlatĂ˝';
+  if (/silver/.test(lower)) metal = type === 'mince' ? 'stĹ™Ă­brnĂˇ' : 'stĹ™Ă­brnĂ˝';
+  if (/platinum/.test(lower)) metal = type === 'mince' ? 'platinovĂˇ' : 'platinovĂ˝';
+  if (/palladium/.test(lower)) metal = type === 'mince' ? 'palladiovĂˇ' : 'palladiovĂ˝';
+  // zpĹŻsob raĹľby: Minted â†’ raĹľenĂ˝, Casted â†’ litĂ˝ (jen u slitkĹŻ)
   let method = '';
   if (type === 'slitek') {
-    if (/minted/i.test(name)) method = metal.endsWith('ý') ? 'ražený' : 'ražená';
-    else if (/casted|cast\b/i.test(name)) method = metal.endsWith('ý') ? 'litý' : 'litá';
+    if (/minted/i.test(name)) method = metal.endsWith('Ă˝') ? 'raĹľenĂ˝' : 'raĹľenĂˇ';
+    else if (/casted|cast\b/i.test(name)) method = metal.endsWith('Ă˝') ? 'litĂ˝' : 'litĂˇ';
   }
-  // série (Fortuna, Buffalo, Britannia, Kinebar...) a u mincí rok ražby
+  // sĂ©rie (Fortuna, Buffalo, Britannia, Kinebar...) a u mincĂ­ rok raĹľby
   const series = detectSeries(name);
   let year = '';
   if (type === 'mince') { const ym = name.match(/\b(19|20)\d{2}\b/); if (ym) year = ym[0]; }
   const weight = normalizeWeight(p.weight || name);
-  // Slitek: [výrobce] [série] [kov] [typ] [ražený/litý] [hmotnost]
-  // Mince:  [výrobce] [série] [kov] [typ] [hmotnost] [rok]
+  // Slitek: [vĂ˝robce] [sĂ©rie] [kov] [typ] [raĹľenĂ˝/litĂ˝] [hmotnost]
+  // Mince:  [vĂ˝robce] [sĂ©rie] [kov] [typ] [hmotnost] [rok]
   const parts = (type === 'mince')
     ? [manufacturer, series, metal, type, weight, year]
     : [manufacturer, series, metal, type, method, weight];
   return clean(parts.filter(Boolean).join(' '));
 }
-// Zkontroluje, jestli název už splňuje pravidla Heureky:
-// výrobce na PRVNÍM místě + obsahuje hmotnost (rozlišení varianty).
+// Zkontroluje, jestli nĂˇzev uĹľ splĹuje pravidla Heureky:
+// vĂ˝robce na PRVNĂŤM mĂ­stÄ› + obsahuje hmotnost (rozliĹˇenĂ­ varianty).
 function isHeurekaCompliantName(name, manufacturer) {
   if (!name) return false;
   const n = name.trim();
   const m = (manufacturer || inferManufacturer(n)) || '';
-  // výrobce musí být na začátku názvu
+  // vĂ˝robce musĂ­ bĂ˝t na zaÄŤĂˇtku nĂˇzvu
   const startsWithMfr = m && n.toLowerCase().startsWith(m.toLowerCase().split(' ')[0].toLowerCase());
-  // musí obsahovat hmotnost (g/kg/oz)
-  const hasWeight = /\d+\s*(g|kg|oz|gramů?|kilo)/i.test(n);
+  // musĂ­ obsahovat hmotnost (g/kg/oz)
+  const hasWeight = /\d+\s*(g|kg|oz|gramĹŻ?|kilo)/i.test(n);
   return Boolean(startsWithMfr && hasWeight);
 }
 
-// Sestaví název dle pravidel Heureky: VÝROBCE (první) → kov → typ → série → hmotnost → rok.
-// Heureka vyžaduje výrobce na prvním místě a rozlišení varianty (hmotnost/rok) v názvu.
+// SestavĂ­ nĂˇzev dle pravidel Heureky: VĂťROBCE (prvnĂ­) â†’ kov â†’ typ â†’ sĂ©rie â†’ hmotnost â†’ rok.
+// Heureka vyĹľaduje vĂ˝robce na prvnĂ­m mĂ­stÄ› a rozliĹˇenĂ­ varianty (hmotnost/rok) v nĂˇzvu.
 function heurekaName(p) {
-  // Využijeme stejnou logiku jako český název — ta už dává výrobce první + hmotnost.
+  // VyuĹľijeme stejnou logiku jako ÄŤeskĂ˝ nĂˇzev â€” ta uĹľ dĂˇvĂˇ vĂ˝robce prvnĂ­ + hmotnost.
   const base = normalizeStoneXToCzName(p);
   return base;
 }
@@ -730,36 +731,36 @@ function compare(stonexRows, supplierRows, opts = {}) {
     let code = String(s.productNumber || s.code || '');
     let supplier = code ? supplierByCode.get(code) : null;
     let matchMethod = supplier ? 'code' : '';
-    // Párujeme POUZE přes kód (part_number = CODE). Název/productKey fallbacky byly
-    // zdrojem špatných párů (Noemova archa ↔ 4 různé StoneX, China Panda ↔ Tudor Beasts),
-    // protože různé produkty stejné hmotnosti mají podobný název. Kód je unikátní.
+    // PĂˇrujeme POUZE pĹ™es kĂłd (part_number = CODE). NĂˇzev/productKey fallbacky byly
+    // zdrojem ĹˇpatnĂ˝ch pĂˇrĹŻ (Noemova archa â†” 4 rĹŻznĂ© StoneX, China Panda â†” Tudor Beasts),
+    // protoĹľe rĹŻznĂ© produkty stejnĂ© hmotnosti majĂ­ podobnĂ˝ nĂˇzev. KĂłd je unikĂˇtnĂ­.
     if (supplier && !code) code = supplier.code;
     const stonexCzk = (s.grossPrice != null) ? round(s.grossPrice, 2)
                       : (s.priceEur ? round(s.priceEur * eurCzk, 2) : null);
-    // Marže z formuláře (nastavitelné po kategoriích), s výchozími hodnotami.
+    // MarĹľe z formulĂˇĹ™e (nastavitelnĂ© po kategoriĂ­ch), s vĂ˝chozĂ­mi hodnotami.
     const mCoin = opts.marginCoin != null ? Number(opts.marginCoin) : 1.5;
     const mBarSmall = opts.marginBarSmall != null ? Number(opts.marginBarSmall) : 2;
     const mBarMid = opts.marginBarMid != null ? Number(opts.marginBarMid) : 1;
     const mBarLarge = opts.marginBarLarge != null ? Number(opts.marginBarLarge) : 0.5;
     const fw = (s.fineWeight != null) ? Number(s.fineWeight) : weightGrams(s.weight || s.name);
-    const isCoin = (s.isCoin === true) || /coin|mince|krugerrand|britannia|maple|philharmonik|kangaroo|kookaburra|koala|lunar|eagle|buffalo|panda|ducat|dukát|libertad|sovereign|peso|corona|franc|noah/i.test(`${s.stonexName || ''} ${s.name || ''}`);
+    const isCoin = (s.isCoin === true) || /coin|mince|krugerrand|britannia|maple|philharmonik|kangaroo|kookaburra|koala|lunar|eagle|buffalo|panda|ducat|dukĂˇt|libertad|sovereign|peso|corona|franc|noah/i.test(`${s.stonexName || ''} ${s.name || ''}`);
     let effPct;
     if (isCoin) effPct = mCoin;                  // mince
-    else if (fw == null) effPct = mBarMid;       // neznámá hmotnost → střední pásmo
+    else if (fw == null) effPct = mBarMid;       // neznĂˇmĂˇ hmotnost â†’ stĹ™ednĂ­ pĂˇsmo
     else if (fw < 31.1035) effPct = mBarSmall;   // slitek do 1 oz
-    else if (fw <= 100) effPct = mBarMid;        // slitek 1 oz až 100 g
+    else if (fw <= 100) effPct = mBarMid;        // slitek 1 oz aĹľ 100 g
     else effPct = mBarLarge;                      // slitek nad 100 g
     let proposedPrice = stonexCzk ? round(stonexCzk * (1 + effPct / 100), 0) : null;
-    // pojistka: prodejka vždy nad nákupkou
+    // pojistka: prodejka vĹľdy nad nĂˇkupkou
     if (proposedPrice != null && stonexCzk != null && proposedPrice <= stonexCzk) {
       proposedPrice = round(stonexCzk * 1.005, 0);
     }
-    // Název: když supplier (Shoptet) název CHYBÍ, vygeneruj český z výrobce+typu+hmotnosti.
-    // Když supplier název je, NEPŘEPISUJEME (necháme tvůj v Shoptetu).
+    // NĂˇzev: kdyĹľ supplier (Shoptet) nĂˇzev CHYBĂŤ, vygeneruj ÄŤeskĂ˝ z vĂ˝robce+typu+hmotnosti.
+    // KdyĹľ supplier nĂˇzev je, NEPĹEPISUJEME (nechĂˇme tvĹŻj v Shoptetu).
     const hasSupplierName = Boolean(supplier?.name && supplier.name.trim());
     const genName = normalizeStoneXToCzName(s);
-    // HEUREKA název: jen když stávající (Shoptet) název NESPLŇUJE pravidla Heureky.
-    // Když splňuje (výrobce první + hmotnost), necháme tvůj a Heureka tag = tvůj název.
+    // HEUREKA nĂˇzev: jen kdyĹľ stĂˇvajĂ­cĂ­ (Shoptet) nĂˇzev NESPLĹ‡UJE pravidla Heureky.
+    // KdyĹľ splĹuje (vĂ˝robce prvnĂ­ + hmotnost), nechĂˇme tvĹŻj a Heureka tag = tvĹŻj nĂˇzev.
     const mfr = supplier?.mint || s.mint || inferManufacturer((hasSupplierName ? supplier.name : s.stonexName) || '');
     const currentName = hasSupplierName ? supplier.name : '';
     const heurekaNm = (currentName && isHeurekaCompliantName(currentName, mfr)) ? currentName : heurekaName(s);
@@ -770,8 +771,8 @@ function compare(stonexRows, supplierRows, opts = {}) {
 
 app.get('/api/health', (_, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
-// ====== AUTOMATICKÝ CYKLUS (cron) ======
-// Marže z env (stejná pásma jako frontend), nastavitelné na Railway Variables.
+// ====== AUTOMATICKĂť CYKLUS (cron) ======
+// MarĹľe z env (stejnĂˇ pĂˇsma jako frontend), nastavitelnĂ© na Railway Variables.
 function marginOptionsFromEnv() {
   return {
     eurCzk: DEFAULT_EUR_CZK,
@@ -782,12 +783,12 @@ function marginOptionsFromEnv() {
   };
 }
 
-// Celý cyklus bez frontendu: supplier z URL → StoneX → compare → feed.
+// CelĂ˝ cyklus bez frontendu: supplier z URL â†’ StoneX â†’ compare â†’ feed.
 async function runFullCycle() {
   const startedAt = new Date().toISOString();
-  // 1) supplier XML z URL (nutné pro automatiku)
+  // 1) supplier XML z URL (nutnĂ© pro automatiku)
   if (!process.env.SHOPTET_SUPPLIER_FEED_URL) {
-    throw new Error('Chybí SHOPTET_SUPPLIER_FEED_URL — bez ní nelze automaticky stáhnout supplier XML.');
+    throw new Error('ChybĂ­ SHOPTET_SUPPLIER_FEED_URL â€” bez nĂ­ nelze automaticky stĂˇhnout supplier XML.');
   }
   const supRes = await axios.get(process.env.SHOPTET_SUPPLIER_FEED_URL, {
     timeout: 60000, headers: { 'User-Agent': USER_AGENT },
@@ -798,17 +799,18 @@ async function runFullCycle() {
   // 2) StoneX katalog (JSON, auto-login)
   const stonexRows = await fetchStoneXJsonRows();
 
-  // 3) párování + ceny — POUZE produkty, které StoneX má skladem (spárované přes kód).
+  // 3) pĂˇrovĂˇnĂ­ + ceny â€” POUZE produkty, kterĂ© StoneX mĂˇ skladem (spĂˇrovanĂ© pĹ™es kĂłd).
   const rows = compare(stonexRows, supplierRows, marginOptionsFromEnv());
 
-  // Co StoneX nemá skladem (nespárované) = NENÍ ve feedu. Žádný dopočet ze spotu.
+  // Co StoneX nemĂˇ skladem (nespĂˇrovanĂ©) = NENĂŤ ve feedu. Ĺ˝ĂˇdnĂ˝ dopoÄŤet ze spotu.
   let spotPriced = 0, belowCostFixed = 0;
 
-  // 4) generování feedu (jen spárované)
+  // 4) generovĂˇnĂ­ feedu (jen spĂˇrovanĂ©)
   const updates = rows.filter(r => r.apply && r.updatePrice && r.code);
   const xml = updateXmlByCode(supplierXml, updates);
 
   GENERATED_FEED = xml.replace(/\n\s*\n+/g, '\n');
+  GENERATED_HEUREKA_FEED = buildHeurekaFeed(GENERATED_FEED);
   LAST_RUN = {
     at: startedAt, finishedAt: new Date().toISOString(), codeVersion: 'heureka-productname-2026-05-31',
     supplier: supplierRows.length, stonex: stonexRows.length,
@@ -819,7 +821,7 @@ async function runFullCycle() {
   return LAST_RUN;
 }
 
-// Ruční spuštění celého cyklu (i pro test). Vyžaduje heslo.
+// RuÄŤnĂ­ spuĹˇtÄ›nĂ­ celĂ©ho cyklu (i pro test). VyĹľaduje heslo.
 app.post('/api/run', requireAuth, async (_req, res) => {
   try { const r = await runFullCycle(); res.json({ ok: true, lastRun: r }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
@@ -829,28 +831,73 @@ app.get('/api/run', requireAuth, async (_req, res) => {
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// STÁLÁ FEED URL — tohle dáš do Shoptetu jako zdroj importu.
+// SestavĂ­ Heureka feed z vygenerovanĂ©ho supplier feedu:
+// - produkty s variantami: zruĹˇĂ­ <VARIANTS>, na produkt dĂˇ FLEXI cenu (niĹľĹˇĂ­), nĂˇzev nechĂˇ ÄŤistĂ˝
+// - produkty bez variant: ponechĂˇ beze zmÄ›ny
+// Heureka/Mergado pak dostane plochĂ˝ seznam bez variant, bez duplicit, s flexi cenou.
+function buildHeurekaFeed(supplierFeedXml) {
+  if (!supplierFeedXml) return null;
+  return supplierFeedXml.replace(/<SHOPITEM\b[\s\S]*?<\/SHOPITEM>/gi, block => {
+    if (!/<VARIANTS>/i.test(block)) return block;  // jednoduchĂ˝ produkt â€” ponechat
+
+    // najdi FLEXI cenu (varianta s kĂłdem -FLEXI / /FLE) a CLASSIC cenu jako fallback
+    let flexiPrice = null, classicPrice = null;
+    for (const m of block.matchAll(/<VARIANT\b[\s\S]*?<\/VARIANT>/gi)) {
+      const v = m[0];
+      const p = parseNumber(textBetween(v, 'PRICE'));
+      if (p == null) continue;
+      if (isFlexiCode(textBetween(v, 'CODE'))) flexiPrice = Math.round(p);
+      else classicPrice = Math.round(p);
+    }
+    const targetPrice = (flexiPrice != null) ? flexiPrice : classicPrice;
+
+    // odstraĹ celĂ˝ blok <VARIANTS>...</VARIANTS> â†’ zĹŻstane jen tÄ›lo produktu (hlaviÄŤka)
+    let out = block.replace(/<VARIANTS>[\s\S]*?<\/VARIANTS>/i, '');
+
+    // produkt po odstranÄ›nĂ­ variant nemĂˇ <PRICE> v tÄ›le â†’ doplnĂ­me flexi cenu
+    if (targetPrice != null) {
+      if (/<PRICE>[\s\S]*?<\/PRICE>/i.test(out)) {
+        out = replaceTag(out, 'PRICE', String(targetPrice), true);
+      } else {
+        // vloĹľ <PRICE> pĹ™ed </SHOPITEM>
+        out = out.replace(/<\/SHOPITEM>/i, `<PRICE>${targetPrice}</PRICE></SHOPITEM>`);
+      }
+    }
+    return out;
+  });
+}
+
+// STĂLĂ FEED URL â€” tohle dĂˇĹˇ do Shoptetu jako zdroj importu.
 app.get('/output_feed.xml', (_req, res) => {
-  if (!GENERATED_FEED) return res.status(503).send('Feed zatím nevygenerován. Spusť /api/run nebo počkej na cron.');
+  if (!GENERATED_FEED) return res.status(503).send('Feed zatĂ­m nevygenerovĂˇn. SpusĹĄ /api/run nebo poÄŤkej na cron.');
   res.setHeader('Content-Type', 'application/xml; charset=utf-8');
   res.send(GENERATED_FEED);
 });
 
-// Stav posledního běhu
+// HEUREKA FEED â€” pro srovnĂˇvaÄŤe. Bez variant, ÄŤistĂ© nĂˇzvy, cena = FLEXI (niĹľĹˇĂ­).
+// Tuhle URL dĂˇĹˇ do Mergada/Heureky mĂ­sto univerzĂˇlnĂ­ho feedu.
+app.get('/heureka_feed.xml', (_req, res) => {
+  if (!GENERATED_HEUREKA_FEED && GENERATED_FEED) GENERATED_HEUREKA_FEED = buildHeurekaFeed(GENERATED_FEED);
+  if (!GENERATED_HEUREKA_FEED) return res.status(503).send('Heureka feed zatĂ­m nevygenerovĂˇn. SpusĹĄ /api/run nebo poÄŤkej na cron.');
+  res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+  res.send(GENERATED_HEUREKA_FEED);
+});
+
+// Stav poslednĂ­ho bÄ›hu
 app.get('/api/last-run', (_req, res) => res.json({ lastRun: LAST_RUN, hasFeed: !!GENERATED_FEED }));
-// ====== /AUTOMATICKÝ CYKLUS ======
+// ====== /AUTOMATICKĂť CYKLUS ======
 
 
-// Verzní endpoint — ověří, jaká cenová logika reálně běží.
-// Vypíše VŠECHNA pole prvního StoneX produktu — ať vidíme, jak se jmenuje pole s počtem kusů.
+// VerznĂ­ endpoint â€” ovÄ›Ĺ™Ă­, jakĂˇ cenovĂˇ logika reĂˇlnÄ› bÄ›ĹľĂ­.
+// VypĂ­Ĺˇe VĹ ECHNA pole prvnĂ­ho StoneX produktu â€” aĹĄ vidĂ­me, jak se jmenuje pole s poÄŤtem kusĹŻ.
 app.get('/api/diag-fields', requireAuth, async (_req, res) => {
   try {
     const cat = await fetchCatalogJson(catalogUrl(1, 1));
     const first = (cat.products || [])[0] || {};
-    // vrať názvy polí + ukázku prvních 3 produktů (jen klíčová pole)
+    // vraĹĄ nĂˇzvy polĂ­ + ukĂˇzku prvnĂ­ch 3 produktĹŻ (jen klĂ­ÄŤovĂˇ pole)
     const sample = (cat.products || []).slice(0, 5).map(p => ({
       name: p.name, part_number: p.part_number,
-      // všechna pole, co by mohla nést dostupnost:
+      // vĹˇechna pole, co by mohla nĂ©st dostupnost:
       availability: p.availability, available_quantity: p.available_quantity,
       quantity: p.quantity, stock: p.stock, qty: p.qty,
       in_stock: p.in_stock, is_in_stock: p.is_in_stock, stock_status: p.stock_status,
@@ -870,21 +917,21 @@ app.get('/api/diag-version', (_req, res) => {
   });
 });
 
-// Diagnostika loginu: zkusí se přihlásit a vrátí výsledek.
+// Diagnostika loginu: zkusĂ­ se pĹ™ihlĂˇsit a vrĂˇtĂ­ vĂ˝sledek.
 app.get('/api/diag-login', requireAuth, async (_req, res) => {
   try {
     SESSION = { cookies: {}, loggedInAt: null };
     const s = await stonexLogin();
     const haveSession = !!(s.cookies['frontend_session'] || s.cookies['laravel_session']);
     res.json({ ok: haveSession, loggedInAt: s.loggedInAt,
-      cookies: Object.keys(s.cookies), hint: haveSession ? 'Login OK' : 'Cookies získány, ale chybí session — možná jiný endpoint.' });
+      cookies: Object.keys(s.cookies), hint: haveSession ? 'Login OK' : 'Cookies zĂ­skĂˇny, ale chybĂ­ session â€” moĹľnĂˇ jinĂ˝ endpoint.' });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message,
-      hint: 'Zkontroluj STONEX_USER/STONEX_PASS. Pokud StoneX používá jiný login endpoint, pošli mi ho.' });
+      hint: 'Zkontroluj STONEX_USER/STONEX_PASS. Pokud StoneX pouĹľĂ­vĂˇ jinĂ˝ login endpoint, poĹˇli mi ho.' });
   }
 });
 
-// Diagnostika: vyzkouší metody proti StoneX a vrátí, která zabrala.
+// Diagnostika: vyzkouĹˇĂ­ metody proti StoneX a vrĂˇtĂ­, kterĂˇ zabrala.
 app.get('/api/diag-stonex', requireAuth, async (_req, res) => {
   const url = catalogUrl(1, 1);
   const baseHeaders = {
@@ -909,25 +956,25 @@ app.get('/api/diag-stonex', requireAuth, async (_req, res) => {
   res.json({ url, hasCookie: !!process.env.STONEX_COOKIE, results: out });
 });
 app.post('/api/parse-supplier', requireAuth, upload.single('feed'), async (req, res) => { try { let xml = req.file ? req.file.buffer.toString('utf8') : req.body.xml; if (!xml && process.env.SHOPTET_SUPPLIER_FEED_URL) xml = (await axios.get(process.env.SHOPTET_SUPPLIER_FEED_URL, { timeout: 30000, headers: { 'User-Agent': USER_AGENT } })).data; if (!xml) return res.status(400).json({ error: 'Missing XML file or SHOPTET_SUPPLIER_FEED_URL.' }); const products = parseSupplierXml(xml); res.json({ count: products.length, products, xml }); } catch (error) { res.status(500).json({ error: error.message, stage: 'parse-supplier' }); } });
-app.post('/api/fetch-stonex', requireAuth, async (req, res) => { const catalogUrl = req.body.catalogUrl; try { let products, source; try { products = await fetchStoneXJsonRows(); source = 'stonex-json'; } catch (jsonErr) { if (!catalogUrl) throw jsonErr; products = await fetchStoneXPdfRows(catalogUrl); source = 'stonex-pdf'; } res.json({ count: products.length, products, fallbackUsed: source === 'stonex-pdf', source }); } catch (error) { res.status(500).json({ error: error.message, stage: 'fetch-stonex', hint: 'JSON i PDF endpoint selhaly. Zkontroluj STONEX_COOKIE nebo nahraj JSON ručně.' }); } });
+app.post('/api/fetch-stonex', requireAuth, async (req, res) => { const catalogUrl = req.body.catalogUrl; try { let products, source; try { products = await fetchStoneXJsonRows(); source = 'stonex-json'; } catch (jsonErr) { if (!catalogUrl) throw jsonErr; products = await fetchStoneXPdfRows(catalogUrl); source = 'stonex-pdf'; } res.json({ count: products.length, products, fallbackUsed: source === 'stonex-pdf', source }); } catch (error) { res.status(500).json({ error: error.message, stage: 'fetch-stonex', hint: 'JSON i PDF endpoint selhaly. Zkontroluj STONEX_COOKIE nebo nahraj JSON ruÄŤnÄ›.' }); } });
 app.post('/api/compare', requireAuth, (req, res) => { const { stonexRows, supplierRows, options } = req.body; if (!Array.isArray(stonexRows) || !Array.isArray(supplierRows)) return res.status(400).json({ error: 'Missing rows.' }); res.json({ rows: compare(stonexRows, supplierRows, options) }); });
 app.post('/api/generate-feed', requireAuth, (req, res) => { try { const { originalXml, updates } = req.body; if (!originalXml || !Array.isArray(updates)) return res.status(400).json({ error: 'Missing originalXml or updates.' }); const xml = updateXmlByCode(originalXml, updates); res.setHeader('Content-Type', 'application/xml; charset=utf-8'); res.setHeader('Content-Disposition', 'attachment; filename="productsSupplier-updated.xml"'); res.send(xml); } catch (error) { res.status(500).json({ error: error.message, stage: 'generate-feed' }); } });
 
 app.listen(PORT, () => {
   console.log(`StoneX Shoptet Feed Tool running on port ${PORT}`);
 
-  // Automatické pravidelné přecenění (cron). Plán z env CRON_SCHEDULE, default každou hodinu.
+  // AutomatickĂ© pravidelnĂ© pĹ™ecenÄ›nĂ­ (cron). PlĂˇn z env CRON_SCHEDULE, default kaĹľdou hodinu.
   const schedule = process.env.CRON_SCHEDULE || '0 * * * *';
   if (process.env.ENABLE_CRON !== 'false' && cron.validate(schedule)) {
     cron.schedule(schedule, () => {
-      console.log(`[CRON] Spouštím automatické přecenění (${schedule})...`);
+      console.log(`[CRON] SpouĹˇtĂ­m automatickĂ© pĹ™ecenÄ›nĂ­ (${schedule})...`);
       runFullCycle().catch(e => console.error('[CRON] Chyba:', e.message));
     });
-    console.log(`[CRON] Naplánováno: ${schedule}`);
-    // První běh krátce po startu (ať je feed hned k dispozici)
-    setTimeout(() => runFullCycle().catch(e => console.error('[CRON] Úvodní běh:', e.message)), 5000);
+    console.log(`[CRON] NaplĂˇnovĂˇno: ${schedule}`);
+    // PrvnĂ­ bÄ›h krĂˇtce po startu (aĹĄ je feed hned k dispozici)
+    setTimeout(() => runFullCycle().catch(e => console.error('[CRON] ĂšvodnĂ­ bÄ›h:', e.message)), 5000);
   } else {
-    console.log('[CRON] Vypnuto (ENABLE_CRON=false nebo neplatný CRON_SCHEDULE).');
+    console.log('[CRON] Vypnuto (ENABLE_CRON=false nebo neplatnĂ˝ CRON_SCHEDULE).');
   }
 });
 
